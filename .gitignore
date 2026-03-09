@@ -5,3 +5,6 @@ __pycache__/
 .mypy_cache/
 __docx_extract/
 __docx.zip
+*.pyc
+output/
+logs/
