@@ -32,8 +32,8 @@ class KBParser:
 
         for city in cities:
             city_id = city.get("id")
-            city_name = city.get("name")
-            region = city.get("region") or city.get("regionName")
+            city_name = self._extract_city_name(city)
+            region = self._extract_region_name(city) or self._derive_region_from_city(city)
             if city_id is None:
                 self.logger.warning("KB: skip city without id: %s", city)
                 continue
@@ -140,10 +140,12 @@ class KBParser:
         region: str | None,
     ) -> StoreRecord:
         source_url = f"{self.base_url}/api/cities/{city_id}/shops/"
+        resolved_city = self._extract_city_name(shop) or city_name
+        resolved_region = self._extract_region_name(shop) or region
         return StoreRecord.build(
             network=self.NETWORK_NAME,
-            region=region,
-            city=city_name,
+            region=resolved_region,
+            city=resolved_city,
             address=shop.get("address") if isinstance(shop.get("address"), str) else None,
             work_time=self._format_work_time(shop.get("workTime")),
             lat=self._to_float(shop.get("lat")),
@@ -162,3 +164,31 @@ class KBParser:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _extract_city_name(payload: dict[str, Any]) -> str | None:
+        for key in ("city", "cityName", "name", "town", "locality"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _extract_region_name(payload: dict[str, Any]) -> str | None:
+        for key in ("region", "regionName", "regionTitle", "area", "district"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _derive_region_from_city(city_payload: dict[str, Any]) -> str | None:
+        """Build a fallback region value from city metadata when name is missing."""
+        region_id = city_payload.get("regionId") or city_payload.get("region_id")
+        if region_id is None:
+            return None
+        if isinstance(region_id, (int, float)):
+            return f"region_{int(region_id)}"
+        if isinstance(region_id, str) and region_id.strip():
+            return f"region_{region_id.strip()}"
+        return None

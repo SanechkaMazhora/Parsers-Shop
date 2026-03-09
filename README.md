@@ -1,42 +1,63 @@
 # project_parser
 
-MVP-проект для сбора данных о магазинах трех торговых сетей:
+Парсер торговых сетей (MVP), который собирает данные о магазинах:
 
 - Красное & Белое
 - Монетка
 - Мария-Ра
 
-Парсеры приводят данные к единому формату и сохраняют результат в Excel.
+Система приводит данные к единой модели, сохраняет Excel-отчет и пишет логи выполнения.
 
-## Назначение
+## Цель проекта
 
-Система запускает один или несколько парсеров, собирает магазины в структуру:
+Автоматизировать сбор адресов и атрибутов магазинов из разных источников (REST API, HTML, встроенный JS) в единый формат:
 
-- network
-- region
-- city
-- address
-- work_time
-- lat
-- lng
-- phone
-- store_format
-- status
-- source_url
-- parsed_at
+- `network`
+- `region`
+- `city`
+- `address`
+- `work_time`
+- `lat`
+- `lng`
+- `phone`
+- `store_format`
+- `status`
+- `source_url`
+- `parsed_at`
 
-Если поле недоступно в источнике, сохраняется `None`.
+## Архитектура
 
-## Требования
-
-- Python 3.11+ (рекомендуется 3.12)
-- Доступ в интернет для загрузки данных сайтов
-- Для fallback Мария-Ра: установленный Playwright браузер Chromium (опционально)
+```text
+project_parser/
+  parsers/
+    kb_parser.py
+    monetka_parser.py
+    maria_ra_parser.py
+  core/
+    http_client.py
+    models.py
+    excel_export.py
+    logging_config.py
+  tests/
+  logs/
+  output/
+  main.py
+  requirements.txt
+  implementation_plan.md
+```
 
 ## Установка
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+Для fallback в `MariaRaParser`:
+
+```bash
+playwright install chromium
 ```
 
 ## Запуск
@@ -44,10 +65,11 @@ pip install -r requirements.txt
 Запуск всех парсеров:
 
 ```bash
+python main.py
 python main.py run
 ```
 
-Запуск одного парсера:
+Запуск отдельной сети:
 
 ```bash
 python main.py run --network kb
@@ -55,19 +77,50 @@ python main.py run --network monetka
 python main.py run --network maria_ra
 ```
 
-Также поддержан запуск без подкоманды (эквивалент `run`):
+Если один парсер падает, остальные продолжают работу.
+
+## Excel-результат
+
+Файл: `output/stores.xlsx`
+
+Листы:
+
+1. `Актуальные данные` — полный актуальный срез.
+2. `Изменения` — сравнение с предыдущим файлом по ключу `(network, city, address)`.
+3. `Статистика` — агрегаты по количеству магазинов.
+
+Лист `Изменения` содержит:
+
+- `network`
+- `city`
+- `address`
+- `change_type` (`added`, `removed`, `updated:<field>`)
+- `old_value`
+- `new_value`
+- `detected_at`
+
+Отслеживаемые поля обновлений: `work_time`, `phone`, `store_format`, `status`.
+
+## Логирование
+
+- Файл: `logs/parser.log`
+- Уровни: `INFO`, `WARNING`, `ERROR`
+- Есть вывод в консоль и timestamp в каждой записи.
+
+## Тесты
 
 ```bash
-python main.py
+python -m pytest -q
 ```
 
-## Результаты
+Базово покрыто:
 
-- Excel: `output/stores.xlsx`
-- Логи: `logs/parser.log`
+- модель `StoreRecord`
+- формирование Excel и листов
+- часть нормализации в парсерах
 
-Файл Excel содержит листы:
+## Известные ограничения
 
-- `Актуальные данные`
-- `Статистика`
-
+- Внешние сайты могут менять структуру HTML/JS и endpoint-ы.
+- Для некоторых магазинов часть полей недоступна в источнике и сохраняется как `None`.
+- `Мария-Ра` использует многоступенчатый подход; fallback на Playwright требует установленный браузер.

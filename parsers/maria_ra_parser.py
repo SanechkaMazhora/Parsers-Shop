@@ -28,20 +28,24 @@ class MariaRaParser:
 
     def parse(self) -> list[StoreRecord]:
         """Collect stores from map page scripts or fallback DOM extraction."""
-        try:
-            html = self.client.get_text(self.map_url)
-        except Exception as exc:
-            self.logger.error("Maria-Ra: failed loading map page: %s", exc)
+        html = self._load_map_html_with_age_gate()
+        if html is None:
             return []
 
         stores_raw = self._extract_stores_from_html(html)
+        if stores_raw:
+            self.logger.info("Maria-Ra: strategy success = inline_js")
         if not stores_raw:
             self.logger.warning("Maria-Ra: no stores in inline JS, trying external JS")
             stores_raw = self._extract_stores_from_external_scripts(html)
+            if stores_raw:
+                self.logger.info("Maria-Ra: strategy success = external_js")
 
         if not stores_raw:
             self.logger.warning("Maria-Ra: requests-based extraction failed, trying Playwright fallback")
             stores_raw = self._playwright_fallback()
+            if stores_raw:
+                self.logger.info("Maria-Ra: strategy success = playwright_fallback")
 
         stores: list[StoreRecord] = []
         for item in stores_raw:
@@ -51,6 +55,34 @@ class MariaRaParser:
                 self.logger.warning("Maria-Ra: failed parsing one store: %s", exc)
         self.logger.info("Maria-Ra: parsed %s stores", len(stores))
         return stores
+
+    def _load_map_html_with_age_gate(self) -> str | None:
+        """Load map HTML and retry with age-confirmation cookies if needed."""
+        try:
+            html = self.client.get_text(self.map_url)
+        except Exception as exc:
+            self.logger.error("Maria-Ra: failed loading map page: %s", exc)
+            return None
+
+        if not self._is_age_gate_page(html):
+            return html
+
+        self.logger.warning("Maria-Ra: age gate detected, retrying with confirm cookies")
+        self._set_age_gate_cookies()
+        try:
+            # Prime main domain first so backend can apply session/cookie checks.
+            self.client.get_text(self.base_url)
+        except Exception as exc:
+            self.logger.info("Maria-Ra: base page reload failed during age bypass: %s", exc)
+        try:
+            html = self.client.get_text(self.map_url)
+        except Exception as exc:
+            self.logger.error("Maria-Ra: map reload failed after age bypass: %s", exc)
+            return None
+
+        if self._is_age_gate_page(html):
+            self.logger.warning("Maria-Ra: age gate still present after cookie bypass")
+        return html
 
     def _extract_stores_from_html(self, html: str) -> list[dict[str, Any]]:
         soup = BeautifulSoup(html, "lxml")
@@ -211,8 +243,15 @@ class MariaRaParser:
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=True)
-                page = browser.new_page()
+                context = browser.new_context()
+                page = context.new_page()
+                self._prepare_age_bypass_playwright(context)
                 page.goto(self.map_url, wait_until="networkidle", timeout=60000)
+                self._dismiss_age_gate_playwright(page)
+                if self._is_age_gate_page(page.content()):
+                    self.logger.warning("Maria-Ra: Playwright still sees age gate, reloading map")
+                    page.goto(self.map_url, wait_until="networkidle", timeout=60000)
+                    self._dismiss_age_gate_playwright(page)
                 page.wait_for_timeout(3000)
                 payload = page.evaluate(
                     """() => {
@@ -231,12 +270,76 @@ class MariaRaParser:
                         return [];
                     }"""
                 )
+                context.close()
                 browser.close()
                 if isinstance(payload, list):
                     return [item for item in payload if isinstance(item, dict)]
         except Exception as exc:
             self.logger.error("Maria-Ra: Playwright fallback failed: %s", exc)
         return []
+
+    def _set_age_gate_cookies(self) -> None:
+        """Set common age-confirmation cookies used by age gates."""
+        cookie_variants = (
+            ("is_adult", "1"),
+            ("adult", "1"),
+            ("age_verified", "1"),
+            ("confirm18", "1"),
+            ("age", "18"),
+        )
+        for name, value in cookie_variants:
+            self.client.session.cookies.set(name, value, domain=".maria-ra.ru", path="/")
+            self.client.session.cookies.set(name, value, domain="www.maria-ra.ru", path="/")
+
+    @staticmethod
+    def _is_age_gate_page(html: str) -> bool:
+        text = re.sub(r"\s+", " ", html.lower())
+        markers = (
+            "18+",
+            "age-gate",
+            "age_gate",
+            "вам есть 18",
+            "подтвердите возраст",
+            "подтверждение возраста",
+        )
+        return any(marker in text for marker in markers)
+
+    def _prepare_age_bypass_playwright(self, context: Any) -> None:
+        """Preseed common age-confirmation cookies before opening pages."""
+        cookies = [
+            {"name": "is_adult", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
+            {"name": "adult", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
+            {"name": "age_verified", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
+            {"name": "confirm18", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
+            {"name": "age", "value": "18", "domain": ".maria-ra.ru", "path": "/"},
+        ]
+        try:
+            context.add_cookies(cookies)
+        except Exception as exc:
+            self.logger.info("Maria-Ra: Playwright cookie preseed failed: %s", exc)
+
+    def _dismiss_age_gate_playwright(self, page: Any) -> None:
+        """Try to confirm 18+ dialog via common selectors."""
+        selectors = (
+            "button:has-text('Да')",
+            "button:has-text('Мне есть 18')",
+            "button:has-text('Мне исполнилось 18')",
+            "button:has-text('Подтвердить')",
+            "a:has-text('Да')",
+            ".age-confirm button",
+            ".age-gate button",
+            "[data-age-confirm]",
+            "[data-confirm-age]",
+        )
+        for selector in selectors:
+            try:
+                if page.locator(selector).count() > 0:
+                    page.locator(selector).first.click(timeout=1500)
+                    page.wait_for_timeout(700)
+                    if not self._is_age_gate_page(page.content()):
+                        return
+            except Exception:
+                continue
 
     def _normalize_store(self, store: dict[str, Any]) -> StoreRecord:
         city = store.get("city") if isinstance(store.get("city"), str) else None
@@ -287,4 +390,3 @@ class MariaRaParser:
             return float(value)
         except (TypeError, ValueError):
             return None
-

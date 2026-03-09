@@ -143,6 +143,8 @@ class MonetkaParser:
         store_format = details.get("store_format") or self._extract_label_value(text, ("Формат магазина",))
         phone = details.get("phone") or self._extract_phone(text)
         city, region = self._extract_city_region(soup, url)
+        city = city or self._extract_label_value(text, ("Город", "Населенный пункт"))
+        region = region or self._extract_label_value(text, ("Регион", "Область", "Край", "Республика"))
 
         return StoreRecord.build(
             network=self.NETWORK_NAME,
@@ -209,25 +211,96 @@ class MonetkaParser:
 
     @staticmethod
     def _extract_city_region(soup: BeautifulSoup, url: str) -> tuple[str | None, str | None]:
-        crumbs = [item.get_text(" ", strip=True) for item in soup.select("nav a, .breadcrumbs a, .breadcrumbs span")]
-        crumbs = [c for c in crumbs if c]
+        parsed_path = [part for part in urlparse(url).path.split("/") if part]
         city: str | None = None
         region: str | None = None
+        city_slug: str | None = None
 
+        # /shops_map/{city_slug}/{id} or /{region_slug}/shops_map/{city_slug}/{id}
+        if "shops_map" in parsed_path:
+            idx = parsed_path.index("shops_map")
+            if idx + 1 < len(parsed_path):
+                city_slug = parsed_path[idx + 1]
+                city = MonetkaParser._slug_to_name(city_slug)
+            if idx >= 1:
+                region = MonetkaParser._slug_to_name(parsed_path[idx - 1])
+
+        crumbs = [item.get_text(" ", strip=True) for item in soup.select(".breadcrumbs a, .breadcrumbs span, nav.breadcrumbs a, nav.breadcrumbs span")]
+        crumbs = [c for c in crumbs if c]
         if crumbs:
-            if len(crumbs) >= 2:
-                city = crumbs[-1]
-                region = crumbs[-2]
-            else:
-                city = crumbs[-1]
-
-        parsed_path = [part for part in urlparse(url).path.split("/") if part]
-        # /shops_map/{city_slug}/{id} or /{region}/shops_map/{city_slug}/{id}
-        if city is None and len(parsed_path) >= 3:
-            if "shops_map" in parsed_path:
-                idx = parsed_path.index("shops_map")
-                if idx + 1 < len(parsed_path):
-                    city = parsed_path[idx + 1]
-                if idx >= 1:
-                    region = region or parsed_path[idx - 1]
+            city_from_crumbs = MonetkaParser._pick_city_from_crumbs(crumbs, city_slug)
+            region_from_crumbs = MonetkaParser._pick_region_from_crumbs(crumbs, city_from_crumbs)
+            city = city_from_crumbs or city
+            region = region_from_crumbs or region
         return city, region
+
+    @staticmethod
+    def _slug_to_name(slug: str | None) -> str | None:
+        if not slug:
+            return None
+        value = slug.strip().strip("/").replace("-", " ").replace("_", " ")
+        if not value:
+            return None
+        normalized = MonetkaParser._normalize_location_name(value)
+        return normalized
+
+    @staticmethod
+    def _normalize_location_name(value: str) -> str:
+        aliases = {
+            "urfo": "Уральский федеральный округ",
+            "sfo": "Сибирский федеральный округ",
+            "cfo": "Центральный федеральный округ",
+        }
+        lowered = value.lower().strip()
+        if lowered in aliases:
+            return aliases[lowered]
+        words = [part for part in value.split() if part]
+        return " ".join(word.capitalize() for word in words)
+
+    @staticmethod
+    def _normalize_token(value: str) -> str:
+        return re.sub(r"[^a-zа-я0-9]+", "", value.lower())
+
+    @staticmethod
+    def _is_probably_address(value: str) -> bool:
+        lowered = value.lower()
+        if re.search(r"\d", lowered):
+            return True
+        return any(token in lowered for token in ("ул.", "улица", "дом", "пр-кт", "проспект", "д."))
+
+    @staticmethod
+    def _is_generic_breadcrumb(value: str) -> bool:
+        lowered = value.lower()
+        return lowered in {"главная", "магазины", "карта магазинов"}
+
+    @staticmethod
+    def _pick_city_from_crumbs(crumbs: list[str], city_slug: str | None) -> str | None:
+        if city_slug:
+            slug_token = MonetkaParser._normalize_token(city_slug)
+            for crumb in crumbs:
+                if MonetkaParser._normalize_token(crumb) == slug_token:
+                    return crumb
+        for crumb in reversed(crumbs):
+            if MonetkaParser._is_generic_breadcrumb(crumb):
+                continue
+            if MonetkaParser._is_probably_address(crumb):
+                continue
+            return crumb
+        return None
+
+    @staticmethod
+    def _pick_region_from_crumbs(crumbs: list[str], city: str | None) -> str | None:
+        if not city:
+            return None
+        try:
+            city_index = crumbs.index(city)
+        except ValueError:
+            return None
+        for i in range(city_index - 1, -1, -1):
+            candidate = crumbs[i]
+            if MonetkaParser._is_generic_breadcrumb(candidate):
+                continue
+            if MonetkaParser._is_probably_address(candidate):
+                continue
+            return candidate
+        return None

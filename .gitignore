@@ -1,10 +1,30 @@
-.venv/
-.tmp/
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+pytest-cache-files-*/
+
+# Virtual envs
+.venv/
+venv/
+.env
+
+# Local temp/build artifacts
+.tmp/
+tmp/
+dist/
+build/
+*.egg-info/
 __docx_extract/
 __docx.zip
-*.pyc
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Runtime outputs
 output/
 logs/
