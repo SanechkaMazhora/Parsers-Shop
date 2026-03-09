@@ -1,0 +1,9 @@
+requests
+beautifulsoup4
+lxml
+playwright
+pandas
+openpyxl
+python-dotenv
+pydantic
+tenacity
