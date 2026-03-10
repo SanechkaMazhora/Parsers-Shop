@@ -9,6 +9,7 @@ pytest-cache-files-*/
 
 # Virtual envs
 .venv/
+.venv*/
 venv/
 .env
 

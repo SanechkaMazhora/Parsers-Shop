@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
-from urllib.parse import urljoin
-
-from bs4 import BeautifulSoup
 
 from core.http_client import HttpClient
 from core.models import StoreRecord
@@ -22,11 +18,9 @@ class KBParser:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
         self.base_url = "https://krasnoeibeloe.ru"
-        self.address_page_url = f"{self.base_url}/address/"
         self._city_endpoint_candidates = (
-            f"{self.base_url}/address/list/",
-            f"{self.base_url}/address/list",
-            f"{self.base_url}/address/list/?ajax=y",
+            f"{self.base_url}/api/cities/list/",
+            f"{self.base_url}/api/cities/list",
         )
 
     def parse(self) -> list[StoreRecord]:
@@ -79,39 +73,8 @@ class KBParser:
         return []
 
     def _build_city_endpoint_candidates(self) -> list[str]:
-        candidates: list[str] = []
-        for url in self._city_endpoint_candidates:
-            if url not in candidates:
-                candidates.append(url)
-        for discovered in self._discover_city_endpoints():
-            if discovered not in candidates:
-                candidates.append(discovered)
-        return candidates
-
-    def _discover_city_endpoints(self) -> list[str]:
-        """Extract city list endpoint hints from /address/ page scripts."""
-        try:
-            html = self.client.get_text(self.address_page_url)
-        except Exception as exc:
-            self.logger.info("KB: failed loading address page for endpoint discovery: %s", exc)
-            return []
-
-        soup = BeautifulSoup(html, "lxml")
-        script_text = "\n".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))
-        haystack = f"{html}\n{script_text}"
-        patterns = (
-            r"['\"](?P<path>/?address/list/?(?:\?[^'\"\\s]*)?)['\"]",
-            r"['\"](?P<path>list/?(?:\?[^'\"\\s]*)?)['\"]",
-        )
-
-        discovered: list[str] = []
-        for pattern in patterns:
-            for match in re.finditer(pattern, haystack, flags=re.IGNORECASE):
-                path = match.group("path").strip()
-                absolute = urljoin(self.address_page_url, path)
-                if absolute not in discovered:
-                    discovered.append(absolute)
-        return discovered
+        # Keep stable priority and remove duplicates.
+        return list(dict.fromkeys(self._city_endpoint_candidates))
 
     def _load_city_stores(self, city_id: int) -> list[dict[str, Any]]:
         url = f"{self.base_url}/api/cities/{city_id}/shops/"

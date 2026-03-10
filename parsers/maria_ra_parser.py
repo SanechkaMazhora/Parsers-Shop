@@ -287,9 +287,24 @@ class MariaRaParser:
         cleaned = re.sub(r"\s+", " ", name).strip(" ,")
         if not cleaned:
             return None, None
-        split_match = re.match(r"^(?:г\.?|город|пгт|пос\.?|с\.)\s*([^,]+),\s*(.+)$", cleaned, flags=re.IGNORECASE)
+        split_match = re.match(
+            r"^(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*([^,]+),\s*(.+)$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         if split_match:
             return split_match.group(1).strip(), split_match.group(2).strip()
+
+        # Sometimes city and address are merged without comma: "рп Кольцово ул.Центральная, 1".
+        merged_match = re.match(
+            r"^(?P<city>(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*.+?)\s+"
+            r"(?P<address>(?:ул\.|улица|пр-кт|просп|пер\.|переулок|мкр\.?|квартал|б-р|бул\.|д\.|дом).+)$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if merged_match:
+            return merged_match.group("city").strip(), merged_match.group("address").strip()
+
         parts = [part.strip() for part in cleaned.split(",", 1)]
         if len(parts) == 2:
             city_guess = parts[0]
@@ -489,9 +504,11 @@ class MariaRaParser:
                 continue
 
     def _normalize_store(self, store: dict[str, Any]) -> StoreRecord:
-        city = store.get("city") if isinstance(store.get("city"), str) else None
-        region = store.get("region") if isinstance(store.get("region"), str) else None
-        address = store.get("address") if isinstance(store.get("address"), str) else None
+        city_raw = store.get("city") if isinstance(store.get("city"), str) else None
+        region_raw = store.get("region") if isinstance(store.get("region"), str) else None
+        address_raw = store.get("address") if isinstance(store.get("address"), str) else None
+        city, address = self._clean_city_and_address(city_raw, address_raw)
+        region = self._clean_region(region_raw)
         work_time = store.get("work_time") if isinstance(store.get("work_time"), str) else None
         lat, lng = self._extract_coords(store)
 
@@ -518,6 +535,114 @@ class MariaRaParser:
             status=status,
             source_url=self.map_url,
         )
+
+    @staticmethod
+    def _clean_text(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = re.sub(r"\s+", " ", value).strip(" \t\r\n,;")
+        cleaned = re.sub(r"\)+\s*$", "", cleaned).strip(" ,;")
+        return cleaned or None
+
+    @staticmethod
+    def _looks_like_address(value: str | None) -> bool:
+        if not value:
+            return False
+        lowered = value.lower()
+        markers = (
+            "ул",
+            "улиц",
+            "пр-кт",
+            "просп",
+            "пер",
+            "переул",
+            "квартал",
+            "мкр",
+            "дом",
+            "д.",
+            "б-р",
+            "бул",
+            "шоссе",
+        )
+        return bool(re.search(r"\d", lowered) or any(marker in lowered for marker in markers))
+
+    @staticmethod
+    def _clean_region(value: str | None) -> str | None:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return None
+        technical_regions = {
+            "SELECTION_WINES",
+            "COFFEE_FRAME",
+            "ROUND_CLOCK_SERVICES",
+            "OPENING_SOON",
+        }
+        if cleaned in technical_regions:
+            return None
+        if re.fullmatch(r"[A-Z0-9_]{3,}", cleaned):
+            return None
+        if not re.search(r"[А-Яа-яЁё]", cleaned):
+            return None
+        return cleaned
+
+    @staticmethod
+    def _clean_city(value: str | None) -> str | None:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return None
+        cleaned = cleaned.rstrip(")")
+        cleaned = re.sub(r"\s*\)\s*$", "", cleaned).strip(" ,;")
+        if MariaRaParser._looks_like_address(cleaned):
+            return None
+        return cleaned or None
+
+    @staticmethod
+    def _clean_address(value: str | None, city_hint: str | None = None) -> str | None:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return None
+        if city_hint and "," in cleaned:
+            left, right = [part.strip() for part in cleaned.split(",", 1)]
+            if MariaRaParser._normalize_text_token(left) == MariaRaParser._normalize_text_token(city_hint) and right:
+                cleaned = right
+        if not re.search(r"[А-Яа-яЁё0-9]", cleaned):
+            return None
+        return cleaned
+
+    @staticmethod
+    def _normalize_text_token(value: str | None) -> str:
+        if not value:
+            return ""
+        return re.sub(r"[^a-zа-я0-9]+", "", value.lower())
+
+    @staticmethod
+    def _clean_city_and_address(city: str | None, address: str | None) -> tuple[str | None, str | None]:
+        cleaned_city = MariaRaParser._clean_text(city)
+        cleaned_address = MariaRaParser._clean_address(address)
+
+        if cleaned_city:
+            # Handle merged city+address in one field.
+            merged = re.match(
+                r"^(?P<city>(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*.+?)\s+"
+                r"(?P<address>(?:ул\.|улица|пр-кт|просп|пер\.|переулок|мкр\.?|квартал|б-р|бул\.|д\.|дом).+)$",
+                cleaned_city,
+                flags=re.IGNORECASE,
+            )
+            if merged:
+                cleaned_city = merged.group("city").strip()
+                if not cleaned_address:
+                    cleaned_address = merged.group("address").strip()
+
+            if "," in cleaned_city:
+                left, right = [part.strip() for part in cleaned_city.split(",", 1)]
+                if left and MariaRaParser._looks_like_address(right):
+                    cleaned_city = left
+                    if not cleaned_address:
+                        cleaned_address = right
+
+        normalized_city = MariaRaParser._clean_city(cleaned_city)
+        normalized_address = MariaRaParser._clean_address(cleaned_address, city_hint=normalized_city)
+        return normalized_city, normalized_address
 
     @staticmethod
     def _extract_coords(store: dict[str, Any]) -> tuple[float | None, float | None]:

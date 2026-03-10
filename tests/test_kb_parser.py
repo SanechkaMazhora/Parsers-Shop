@@ -3,11 +3,11 @@ from __future__ import annotations
 from parsers.kb_parser import KBParser
 
 
-def test_kb_city_endpoints_use_address_list_strategy() -> None:
+def test_kb_city_endpoints_use_api_cities_list_strategy() -> None:
     parser = KBParser(client=None)
 
-    assert any("/address/list" in endpoint for endpoint in parser._city_endpoint_candidates)
-    assert all("/api/cities/list" not in endpoint for endpoint in parser._city_endpoint_candidates)
+    assert any("/api/cities/list" in endpoint for endpoint in parser._city_endpoint_candidates)
+    assert all("/address/list" not in endpoint for endpoint in parser._city_endpoint_candidates)
 
 
 def test_extract_city_name_prefers_city_fields() -> None:

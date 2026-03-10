@@ -26,3 +26,23 @@ def test_playwright_fallback_is_graceful_when_import_fails(monkeypatch, caplog) 
 
     assert stores == []
     assert any("Playwright unavailable, skipping fallback" in record.message for record in caplog.records)
+
+
+def test_clean_region_filters_technical_tokens() -> None:
+    assert MariaRaParser._clean_region("SELECTION_WINES") is None
+    assert MariaRaParser._clean_region("ROUND_CLOCK_SERVICES") is None
+    assert MariaRaParser._clean_region("Новосибирская область") == "Новосибирская область"
+
+
+def test_clean_city_and_address_splits_merged_city_string() -> None:
+    city, address = MariaRaParser._clean_city_and_address("рп Кольцово ул.Центральная, 5", None)
+
+    assert city == "рп Кольцово"
+    assert address == "ул.Центральная, 5"
+
+
+def test_clean_city_strips_trailing_parenthesis_noise() -> None:
+    city, address = MariaRaParser._clean_city_and_address("п. Победа)", "ул. Школьная, 1")
+
+    assert city == "п. Победа"
+    assert address == "ул. Школьная, 1"
