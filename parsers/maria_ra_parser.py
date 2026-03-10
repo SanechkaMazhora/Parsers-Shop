@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import ast
+import warnings
 from html import unescape
 from typing import Any
 from urllib.parse import urljoin
@@ -42,11 +44,18 @@ class MariaRaParser:
                 self.logger.info("Maria-Ra: strategy success = external_js")
 
         if not stores_raw:
+            self.logger.warning("Maria-Ra: no stores in scripts, trying HTML-embedded map data")
+            stores_raw = self._extract_stores_from_data_attributes(html)
+            if stores_raw:
+                self.logger.info("Maria-Ra: strategy success = html_embedded")
+
+        if not stores_raw:
             self.logger.warning("Maria-Ra: requests-based extraction failed, trying Playwright fallback")
             stores_raw = self._playwright_fallback()
             if stores_raw:
                 self.logger.info("Maria-Ra: strategy success = playwright_fallback")
 
+        stores_raw = self._deduplicate_candidates(stores_raw)
         stores: list[StoreRecord] = []
         for item in stores_raw:
             try:
@@ -117,8 +126,38 @@ class MariaRaParser:
                 return stores
         return []
 
+    def _extract_stores_from_data_attributes(self, html: str) -> list[dict[str, Any]]:
+        soup = BeautifulSoup(html, "lxml")
+        attributes = (
+            "data-objects",
+            "data-points",
+            "data-shops",
+            "data-stores",
+            "data-features",
+        )
+        for node in soup.find_all(True):
+            for attr_name in attributes:
+                raw = node.attrs.get(attr_name)
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                parsed = self._safe_json_loads(unescape(raw))
+                normalized = self._normalize_candidate_list(parsed)
+                if normalized:
+                    return normalized
+        return []
+
     def _extract_store_candidates_from_script(self, script: str) -> list[dict[str, Any]]:
-        # 1) direct arrays: markers/stores/shops/features/points = [...]
+        # 1) JSON.parse("...") payloads with escaped JSON inside strings.
+        for match in re.finditer(r"JSON\.parse\(\s*(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*')\s*\)", script):
+            decoded = self._decode_js_string_literal(match.group(1))
+            if not decoded:
+                continue
+            parsed = self._safe_json_loads(decoded)
+            normalized = self._normalize_candidate_list(parsed)
+            if normalized:
+                return normalized
+
+        # 2) direct arrays: markers/stores/shops/features/points = [...]
         array_patterns = [
             r"(?:shops|stores|points|markers|features)\s*[:=]\s*(\[[\s\S]*?\])\s*[;,}]",
             r"(\[[\s\S]*?\"(?:address|lat|lng|coords|balloonContent)\"[\s\S]*?\])",
@@ -130,7 +169,20 @@ class MariaRaParser:
                 if normalized:
                     return normalized
 
-        # 2) GeoJSON style object with features
+        # 3) objects with common map payload keys.
+        object_patterns = [
+            r"(?:objects|shopsData|storesData|mapData)\s*[:=]\s*(\{[\s\S]*?\})\s*[;,]",
+        ]
+        for pattern in object_patterns:
+            for match in re.finditer(pattern, script, flags=re.IGNORECASE):
+                parsed = self._safe_json_loads(match.group(1))
+                if isinstance(parsed, dict):
+                    for key in ("features", "objects", "shops", "stores", "points", "data"):
+                        normalized = self._normalize_candidate_list(parsed.get(key))
+                        if normalized:
+                            return normalized
+
+        # 4) GeoJSON style object with features
         for match in re.finditer(r"(\{[\s\S]*?\"features\"\s*:\s*\[[\s\S]*?\][\s\S]*?\})", script):
             parsed = self._safe_json_loads(match.group(1))
             if isinstance(parsed, dict):
@@ -154,7 +206,34 @@ class MariaRaParser:
                 items.append(item)
         return items
 
+    @staticmethod
+    def _decode_js_string_literal(token: str) -> str | None:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                decoded = ast.literal_eval(token)
+        except Exception:
+            return None
+        return decoded if isinstance(decoded, str) else None
+
     def _normalize_raw_js_item(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        # Common Maria-Ra map payload style: NAME + COORDINATE + STARTED/END_WORK
+        if any(key in raw for key in ("NAME", "COORDINATE", "STARTED_WORK", "END_WORK")):
+            name = raw.get("NAME") if isinstance(raw.get("NAME"), str) else None
+            city, address = self._split_city_and_address(name)
+            coord_pair = self._parse_coordinate_string(raw.get("COORDINATE"))
+            work_time = self._build_work_time_from_parts(raw.get("STARTED_WORK"), raw.get("END_WORK"))
+            return {
+                "address": address,
+                "city": city,
+                "region": raw.get("SECTION") if isinstance(raw.get("SECTION"), str) else None,
+                "work_time": work_time,
+                "coords": coord_pair,
+                "phone": None,
+                "status": None,
+                "format": None,
+            }
+
         # GeoJSON feature format
         if isinstance(raw.get("geometry"), dict) or isinstance(raw.get("properties"), dict):
             geometry = raw.get("geometry") if isinstance(raw.get("geometry"), dict) else {}
@@ -191,9 +270,52 @@ class MariaRaParser:
             "format": raw.get("format"),
         }
         # Keep only meaningful store candidates.
-        if candidate["address"] is None and candidate["coords"] is None and candidate["lat"] is None:
+        if (
+            candidate["address"] is None
+            and candidate["coords"] is None
+            and candidate["lat"] is None
+            and candidate["city"] is None
+            and candidate["work_time"] is None
+        ):
             return None
         return candidate
+
+    @staticmethod
+    def _split_city_and_address(name: str | None) -> tuple[str | None, str | None]:
+        if not name:
+            return None, None
+        cleaned = re.sub(r"\s+", " ", name).strip(" ,")
+        if not cleaned:
+            return None, None
+        split_match = re.match(r"^(?:г\.?|город|пгт|пос\.?|с\.)\s*([^,]+),\s*(.+)$", cleaned, flags=re.IGNORECASE)
+        if split_match:
+            return split_match.group(1).strip(), split_match.group(2).strip()
+        parts = [part.strip() for part in cleaned.split(",", 1)]
+        if len(parts) == 2:
+            city_guess = parts[0]
+            if len(city_guess) <= 40:
+                return city_guess, parts[1]
+        return None, cleaned
+
+    @staticmethod
+    def _parse_coordinate_string(value: Any) -> list[float] | None:
+        if not isinstance(value, str):
+            return None
+        chunks = [part.strip() for part in value.split(",")]
+        if len(chunks) != 2:
+            return None
+        try:
+            lat = float(chunks[0])
+            lng = float(chunks[1])
+        except ValueError:
+            return None
+        return [lng, lat]
+
+    @staticmethod
+    def _build_work_time_from_parts(start: Any, end: Any) -> str | None:
+        if isinstance(start, str) and isinstance(end, str) and start.strip() and end.strip():
+            return f"{start.strip()}-{end.strip()}"
+        return None
 
     @staticmethod
     def _parse_popup_content(html_text: str) -> dict[str, str]:
@@ -227,17 +349,40 @@ class MariaRaParser:
         cleaned = payload.strip().rstrip(";")
         cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
         cleaned = cleaned.replace("'", '"')
+        cleaned = cleaned.replace("\\/", "/")
         try:
             return json.loads(cleaned)
         except Exception:
             return None
+
+    @staticmethod
+    def _deduplicate_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = "||".join(
+                [
+                    str(item.get("address") or "").strip().lower(),
+                    str(item.get("city") or "").strip().lower(),
+                    str(item.get("lat") or "").strip(),
+                    str(item.get("lng") or "").strip(),
+                    str(item.get("coords") or "").strip(),
+                ]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _playwright_fallback(self) -> list[dict[str, Any]]:
         """Fallback extraction using Playwright if JS parsing fails."""
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:
-            self.logger.error("Maria-Ra: Playwright unavailable: %s", exc)
+            self.logger.warning("Maria-Ra: Playwright unavailable, skipping fallback: %s", exc)
             return []
 
         try:
@@ -275,7 +420,7 @@ class MariaRaParser:
                 if isinstance(payload, list):
                     return [item for item in payload if isinstance(item, dict)]
         except Exception as exc:
-            self.logger.error("Maria-Ra: Playwright fallback failed: %s", exc)
+            self.logger.warning("Maria-Ra: Playwright fallback failed, skipping: %s", exc)
         return []
 
     def _set_age_gate_cookies(self) -> None:
@@ -294,15 +439,17 @@ class MariaRaParser:
     @staticmethod
     def _is_age_gate_page(html: str) -> bool:
         text = re.sub(r"\s+", " ", html.lower())
-        markers = (
-            "18+",
+        strict_markers = (
             "age-gate",
             "age_gate",
             "вам есть 18",
+            "мне есть 18",
             "подтвердите возраст",
             "подтверждение возраста",
         )
-        return any(marker in text for marker in markers)
+        if any(marker in text for marker in strict_markers):
+            return True
+        return "18+" in text and ("подтверд" in text or "возраст" in text)
 
     def _prepare_age_bypass_playwright(self, context: Any) -> None:
         """Preseed common age-confirmation cookies before opening pages."""

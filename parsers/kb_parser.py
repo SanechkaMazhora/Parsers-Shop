@@ -19,9 +19,7 @@ class KBParser:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.base_url = "https://krasnoeibeloe.ru"
         self._city_endpoint_candidates = (
-            f"{self.base_url}/api/list/",
-            f"{self.base_url}/list/",
-            f"{self.base_url}/api/cities/",
+            f"{self.base_url}/api/cities/list/",
         )
 
     def parse(self) -> list[StoreRecord]:
@@ -64,6 +62,8 @@ class KBParser:
                 payload = self.client.get_json(url)
                 cities = self._extract_city_list(payload)
                 if cities:
+                    region_lookup = self._extract_region_lookup(payload)
+                    self._enrich_cities_with_region(cities, region_lookup)
                     return cities
             except Exception as exc:
                 self.logger.warning("KB: cities endpoint failed %s: %s", url, exc)
@@ -101,6 +101,38 @@ class KBParser:
             if isinstance(nested, list):
                 return [item for item in nested if isinstance(item, dict)]
         return []
+
+    @staticmethod
+    def _extract_region_lookup(payload: Any) -> dict[int, str]:
+        if not isinstance(payload, dict):
+            return {}
+        regions = payload.get("regions")
+        if not isinstance(regions, list):
+            return {}
+        lookup: dict[int, str] = {}
+        for item in regions:
+            if not isinstance(item, dict):
+                continue
+            region_id = item.get("id")
+            region_name = item.get("name")
+            if isinstance(region_id, (int, float)) and isinstance(region_name, str) and region_name.strip():
+                lookup[int(region_id)] = region_name.strip()
+        return lookup
+
+    @staticmethod
+    def _enrich_cities_with_region(cities: list[dict[str, Any]], region_lookup: dict[int, str]) -> None:
+        if not region_lookup:
+            return
+        for city in cities:
+            if not isinstance(city, dict):
+                continue
+            if isinstance(city.get("regionName"), str) and city.get("regionName", "").strip():
+                continue
+            region_id = city.get("regionId") or city.get("region_id")
+            if isinstance(region_id, (int, float)):
+                mapped = region_lookup.get(int(region_id))
+                if mapped:
+                    city["regionName"] = mapped
 
     @staticmethod
     def _format_work_time(raw: Any) -> str | None:
@@ -179,16 +211,29 @@ class KBParser:
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        nested_region = payload.get("region")
+        if isinstance(nested_region, dict):
+            nested_name = nested_region.get("name")
+            if isinstance(nested_name, str) and nested_name.strip():
+                return nested_name.strip()
         return None
 
     @staticmethod
     def _derive_region_from_city(city_payload: dict[str, Any]) -> str | None:
         """Build a fallback region value from city metadata when name is missing."""
+        explicit_name = city_payload.get("regionName") or city_payload.get("region_name")
+        if isinstance(explicit_name, str) and explicit_name.strip():
+            return explicit_name.strip()
+        nested_region = city_payload.get("region")
+        if isinstance(nested_region, dict):
+            nested_name = nested_region.get("name")
+            if isinstance(nested_name, str) and nested_name.strip():
+                return nested_name.strip()
         region_id = city_payload.get("regionId") or city_payload.get("region_id")
         if region_id is None:
             return None
         if isinstance(region_id, (int, float)):
-            return f"region_{int(region_id)}"
+            return f"Регион #{int(region_id)}"
         if isinstance(region_id, str) and region_id.strip():
-            return f"region_{region_id.strip()}"
+            return f"Регион #{region_id.strip()}"
         return None

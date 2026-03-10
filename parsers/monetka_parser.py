@@ -23,6 +23,7 @@ class MonetkaParser:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
         self.base_url = "https://www.monetka.ru"
+        self._debug_location_logs_left = 5
         self.seed_urls = (
             f"{self.base_url}/shops_map/",
             f"{self.base_url}/urfo/shops_map",
@@ -144,7 +145,17 @@ class MonetkaParser:
         phone = details.get("phone") or self._extract_phone(text)
         city, region = self._extract_city_region(soup, url)
         city = city or self._extract_label_value(text, ("Город", "Населенный пункт"))
-        region = region or self._extract_label_value(text, ("Регион", "Область", "Край", "Республика"))
+        city = self._sanitize_location(city)
+        region = self._sanitize_location(region)
+
+        if self._debug_location_logs_left > 0:
+            self.logger.debug(
+                "Monetka: extracted location city='%s' region='%s' source_url=%s",
+                city,
+                region,
+                url,
+            )
+            self._debug_location_logs_left -= 1
 
         return StoreRecord.build(
             network=self.NETWORK_NAME,
@@ -225,6 +236,10 @@ class MonetkaParser:
             if idx >= 1:
                 region = MonetkaParser._slug_to_name(parsed_path[idx - 1])
 
+        title_city, title_region = MonetkaParser._extract_city_region_from_title(soup)
+        city = title_city or city
+        region = title_region or region
+
         crumbs = [item.get_text(" ", strip=True) for item in soup.select(".breadcrumbs a, .breadcrumbs span, nav.breadcrumbs a, nav.breadcrumbs span")]
         crumbs = [c for c in crumbs if c]
         if crumbs:
@@ -232,6 +247,41 @@ class MonetkaParser:
             region_from_crumbs = MonetkaParser._pick_region_from_crumbs(crumbs, city_from_crumbs)
             city = city_from_crumbs or city
             region = region_from_crumbs or region
+
+        script_city, script_region = MonetkaParser._extract_city_region_from_structured_blocks(soup)
+        city = city or script_city
+        region = region or script_region
+        if city_slug and len(city_slug) <= 4:
+            canonical_slug_city = MonetkaParser._slug_to_name(city_slug)
+            if canonical_slug_city:
+                city = canonical_slug_city
+        return MonetkaParser._sanitize_location(city), MonetkaParser._sanitize_location(region)
+
+    @staticmethod
+    def _extract_city_region_from_title(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+        title = soup.title.string.strip() if soup.title and soup.title.string else None
+        if not title:
+            return None, None
+        match = re.search(
+            r"Карта\s+магазинов\s+в\s+(.+?)\s*[—-]\s*Магазины\s+«Монетка»\s*[—-]\s*(.+)$",
+            title,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None, None
+        city = match.group(1).strip()
+        region = match.group(2).strip()
+        return city or None, region or None
+
+    @staticmethod
+    def _extract_city_region_from_structured_blocks(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+        joined_scripts = " ".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))
+        if not joined_scripts:
+            return None, None
+        city_match = re.search(r'"city"\s*:\s*"([^"]+)"', joined_scripts, flags=re.IGNORECASE)
+        region_match = re.search(r'"region"\s*:\s*"([^"]+)"', joined_scripts, flags=re.IGNORECASE)
+        city = city_match.group(1).strip() if city_match else None
+        region = region_match.group(1).strip() if region_match else None
         return city, region
 
     @staticmethod
@@ -250,12 +300,26 @@ class MonetkaParser:
             "urfo": "Уральский федеральный округ",
             "sfo": "Сибирский федеральный округ",
             "cfo": "Центральный федеральный округ",
+            "ekb": "Екатеринбург",
+            "spb": "Санкт-Петербург",
+            "msk": "Москва",
         }
         lowered = value.lower().strip()
         if lowered in aliases:
             return aliases[lowered]
         words = [part for part in value.split() if part]
         return " ".join(word.capitalize() for word in words)
+
+    @staticmethod
+    def _sanitize_location(value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = re.sub(r"\s+", " ", value).strip(" ,.;:-")
+        if len(cleaned) < 2:
+            return None
+        if not re.search(r"[A-Za-zА-Яа-яЁё]", cleaned):
+            return None
+        return cleaned
 
     @staticmethod
     def _normalize_token(value: str) -> str:
