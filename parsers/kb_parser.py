@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
 
 from core.http_client import HttpClient
 from core.models import StoreRecord
@@ -18,8 +22,11 @@ class KBParser:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
         self.base_url = "https://krasnoeibeloe.ru"
+        self.address_page_url = f"{self.base_url}/address/"
         self._city_endpoint_candidates = (
-            f"{self.base_url}/api/cities/list/",
+            f"{self.base_url}/address/list/",
+            f"{self.base_url}/address/list",
+            f"{self.base_url}/address/list/?ajax=y",
         )
 
     def parse(self) -> list[StoreRecord]:
@@ -57,7 +64,7 @@ class KBParser:
         return stores
 
     def _load_cities(self) -> list[dict[str, Any]]:
-        for url in self._city_endpoint_candidates:
+        for url in self._build_city_endpoint_candidates():
             try:
                 payload = self.client.get_json(url)
                 cities = self._extract_city_list(payload)
@@ -70,6 +77,41 @@ class KBParser:
                 continue
         self.logger.warning("KB: cities endpoint not found")
         return []
+
+    def _build_city_endpoint_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        for url in self._city_endpoint_candidates:
+            if url not in candidates:
+                candidates.append(url)
+        for discovered in self._discover_city_endpoints():
+            if discovered not in candidates:
+                candidates.append(discovered)
+        return candidates
+
+    def _discover_city_endpoints(self) -> list[str]:
+        """Extract city list endpoint hints from /address/ page scripts."""
+        try:
+            html = self.client.get_text(self.address_page_url)
+        except Exception as exc:
+            self.logger.info("KB: failed loading address page for endpoint discovery: %s", exc)
+            return []
+
+        soup = BeautifulSoup(html, "lxml")
+        script_text = "\n".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))
+        haystack = f"{html}\n{script_text}"
+        patterns = (
+            r"['\"](?P<path>/?address/list/?(?:\?[^'\"\\s]*)?)['\"]",
+            r"['\"](?P<path>list/?(?:\?[^'\"\\s]*)?)['\"]",
+        )
+
+        discovered: list[str] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, haystack, flags=re.IGNORECASE):
+                path = match.group("path").strip()
+                absolute = urljoin(self.address_page_url, path)
+                if absolute not in discovered:
+                    discovered.append(absolute)
+        return discovered
 
     def _load_city_stores(self, city_id: int) -> list[dict[str, Any]]:
         url = f"{self.base_url}/api/cities/{city_id}/shops/"
@@ -151,16 +193,47 @@ class KBParser:
                 if isinstance(value, str) and value.strip():
                     return value.strip()
             return None
+        if isinstance(raw, list):
+            chunks = [str(item).strip() for item in raw if str(item).strip()]
+            if chunks:
+                return "-".join(chunks)
         return None
 
     @staticmethod
     def _extract_phone(shop: dict[str, Any]) -> str | None:
         if isinstance(shop.get("phone"), str):
-            return shop.get("phone")
+            phone = shop.get("phone", "").strip()
+            return phone or None
         phones = shop.get("phones")
         if isinstance(phones, list):
             first = next((str(p).strip() for p in phones if str(p).strip()), None)
             return first
+        return None
+
+    @staticmethod
+    def _extract_address(shop: dict[str, Any]) -> str | None:
+        for key in ("address", "fullAddress", "shopAddress"):
+            value = shop.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _extract_store_format(shop: dict[str, Any]) -> str | None:
+        for key in ("format", "shopFormat", "shopType", "type"):
+            value = shop.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _extract_status(shop: dict[str, Any]) -> str | None:
+        value = shop.get("status")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        is_active = shop.get("isActive")
+        if isinstance(is_active, bool):
+            return "active" if is_active else "inactive"
         return None
 
     def _normalize_shop(
@@ -171,20 +244,23 @@ class KBParser:
         city_name: str | None,
         region: str | None,
     ) -> StoreRecord:
+        shop_id = shop.get("id") or shop.get("shopId")
         source_url = f"{self.base_url}/api/cities/{city_id}/shops/"
+        if shop_id is not None:
+            source_url = f"{source_url}#{shop_id}"
         resolved_city = self._extract_city_name(shop) or city_name
         resolved_region = self._extract_region_name(shop) or region
         return StoreRecord.build(
             network=self.NETWORK_NAME,
             region=resolved_region,
             city=resolved_city,
-            address=shop.get("address") if isinstance(shop.get("address"), str) else None,
-            work_time=self._format_work_time(shop.get("workTime")),
+            address=self._extract_address(shop),
+            work_time=self._format_work_time(shop.get("workTime") or shop.get("work_time")),
             lat=self._to_float(shop.get("lat")),
             lng=self._to_float(shop.get("lng")),
             phone=self._extract_phone(shop),
-            store_format=shop.get("format") if isinstance(shop.get("format"), str) else None,
-            status=shop.get("status") if isinstance(shop.get("status"), str) else None,
+            store_format=self._extract_store_format(shop),
+            status=self._extract_status(shop),
             source_url=source_url,
         )
 
@@ -199,7 +275,7 @@ class KBParser:
 
     @staticmethod
     def _extract_city_name(payload: dict[str, Any]) -> str | None:
-        for key in ("city", "cityName", "name", "town", "locality"):
+        for key in ("city", "cityName", "name", "town", "locality", "title"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -207,15 +283,16 @@ class KBParser:
 
     @staticmethod
     def _extract_region_name(payload: dict[str, Any]) -> str | None:
-        for key in ("region", "regionName", "regionTitle", "area", "district"):
+        for key in ("region", "regionName", "regionTitle", "region_name", "area", "district"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
         nested_region = payload.get("region")
         if isinstance(nested_region, dict):
-            nested_name = nested_region.get("name")
-            if isinstance(nested_name, str) and nested_name.strip():
-                return nested_name.strip()
+            for key in ("name", "title", "regionName"):
+                nested_name = nested_region.get(key)
+                if isinstance(nested_name, str) and nested_name.strip():
+                    return nested_name.strip()
         return None
 
     @staticmethod

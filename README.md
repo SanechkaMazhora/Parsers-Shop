@@ -48,7 +48,7 @@ project_parser/
 
 ## Parser Strategies
 
-- `KBParser` uses live API endpoints (`/api/cities/list/` + `/api/cities/{id}/shops/`) and maps `regionId` to human-readable region names from API metadata.
+- `KBParser` uses the address-city endpoint strategy (`/address/list/`) and then loads stores via `/api/cities/{id}/shops/`, mapping `regionId` to human-readable region names when available.
 - `MonetkaParser` uses HTML parsing flow (`seed -> city pages -> store pages`) and extracts city/region per individual store page.
 - `MariaRaParser` is requests-first (inline JS, external JS, HTML-embedded map payloads) with optional Playwright fallback.
 - In some Linux environments, Playwright may require additional system libraries (for example `libnspr4` and related dependencies). If unavailable, fallback is skipped with a warning.

@@ -39,4 +39,21 @@ def test_pick_city_from_crumbs_skips_address_like_values() -> None:
 
     city = MonetkaParser._pick_city_from_crumbs(crumbs, city_slug=None)
 
-    assert city == "Тюменская область"
+    assert city is None
+
+
+def test_extract_city_region_prefers_visible_text_over_url_slug() -> None:
+    html = """
+    <dl>
+      <dt>Город</dt>
+      <dd>Екатеринбург</dd>
+      <dt>Регион</dt>
+      <dd>Свердловская область</dd>
+    </dl>
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    city, region = MonetkaParser._extract_city_region(soup, "https://www.monetka.ru/urfo/shops_map/ekb/1194")
+
+    assert city == "Екатеринбург"
+    assert region == "Свердловская область"
