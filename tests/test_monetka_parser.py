@@ -90,3 +90,33 @@ def test_extract_city_context_uses_h1_and_region_hint_when_title_format_is_legac
 
     assert city == "Нижнем Тагиле"
     assert region == "Свердловская область"
+
+
+def test_extract_region_links_discovers_non_urfo_regions() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <a href="/urfo/shops_map/">УРФО</a>
+    <a href="/orenburgskaya-oblasty/shops_map">Оренбургская область</a>
+    <a href="/shops_map/ekb/1194">Store</a>
+    """
+
+    links = sorted(parser._extract_region_links(html, "https://www.monetka.ru/shops_map/"))
+
+    assert "https://www.monetka.ru/urfo/shops_map/" in links
+    assert "https://www.monetka.ru/orenburgskaya-oblasty/shops_map/" in links
+    assert all("/shops_map/ekb/" not in link for link in links)
+
+
+def test_extract_pagination_links_supports_pagen_query() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <a href="?PAGEN_1=2">2</a>
+    <a href="?page=3">3</a>
+    <a href="/shops_map/ekb/page/4">4</a>
+    """
+
+    links = sorted(parser._extract_pagination_links(html, "https://www.monetka.ru/shops_map/ekb"))
+
+    assert "https://www.monetka.ru/shops_map/ekb?PAGEN_1=2" in links
+    assert "https://www.monetka.ru/shops_map/ekb?page=3" in links
+    assert "https://www.monetka.ru/shops_map/ekb/page/4" in links

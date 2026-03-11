@@ -30,8 +30,10 @@ def test_playwright_fallback_is_graceful_when_import_fails(monkeypatch, caplog) 
 
 def test_clean_region_filters_technical_tokens() -> None:
     assert MariaRaParser._clean_region("SELECTION_WINES") is None
+    assert MariaRaParser._clean_region("selection_wines") is None
     assert MariaRaParser._clean_region("ROUND_CLOCK_SERVICES") is None
     assert MariaRaParser._clean_region("Новосибирская область") == "Новосибирская область"
+    assert MariaRaParser._clean_region("ул. Ленина, 1") is None
 
 
 def test_clean_city_and_address_splits_merged_city_string() -> None:
@@ -46,3 +48,10 @@ def test_clean_city_strips_trailing_parenthesis_noise() -> None:
 
     assert city == "п. Победа"
     assert address == "ул. Школьная, 1"
+
+
+def test_clean_city_and_address_extracts_city_from_address_when_city_missing() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "г. Новосибирск, ул. Советская, 10")
+
+    assert city == "Новосибирск"
+    assert address == "ул. Советская, 10"

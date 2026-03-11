@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from core.http_client import HttpClient
@@ -29,15 +30,19 @@ class KBParser:
         cities = self._load_cities()
         self.logger.info("KB: loaded %s cities", len(cities))
 
+        seen_city_ids: set[int] = set()
         for city in cities:
-            city_id = city.get("id")
+            city_id = self._to_int(city.get("id"))
             city_name = self._extract_city_name(city)
             region = self._extract_region_name(city) or self._derive_region_from_city(city)
             if city_id is None:
                 self.logger.warning("KB: skip city without id: %s", city)
                 continue
+            if city_id in seen_city_ids:
+                continue
+            seen_city_ids.add(city_id)
             try:
-                city_stores = self._load_city_stores(int(city_id))
+                city_stores = self._load_city_stores(city_id)
             except Exception as exc:
                 self.logger.error("KB: failed city=%s id=%s: %s", city_name, city_id, exc)
                 continue
@@ -48,14 +53,17 @@ class KBParser:
                     stores.append(
                         self._normalize_shop(
                             shop,
-                            city_id=int(city_id),
+                            city_id=city_id,
                             city_name=city_name if isinstance(city_name, str) else None,
                             region=region if isinstance(region, str) else None,
                         )
                     )
                 except Exception as exc:
                     self.logger.warning("KB: failed parsing one shop city=%s: %s", city_name, exc)
-        return stores
+        deduped = self._deduplicate_stores(stores)
+        if len(deduped) != len(stores):
+            self.logger.info("KB: deduplicated stores %s -> %s", len(stores), len(deduped))
+        return deduped
 
     def _load_cities(self) -> list[dict[str, Any]]:
         for url in self._build_city_endpoint_candidates():
@@ -65,7 +73,7 @@ class KBParser:
                 if cities:
                     region_lookup = self._extract_region_lookup(payload)
                     self._enrich_cities_with_region(cities, region_lookup)
-                    return cities
+                    return self._deduplicate_cities(cities)
             except Exception as exc:
                 self.logger.warning("KB: cities endpoint failed %s: %s", url, exc)
                 continue
@@ -91,20 +99,20 @@ class KBParser:
     @staticmethod
     def _extract_city_list(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
+            return [item for item in payload if KBParser._is_city_candidate(item)]
         if not isinstance(payload, dict):
             return []
         direct = payload.get("cities")
         if isinstance(direct, list):
-            return [item for item in direct if isinstance(item, dict)]
+            return [item for item in direct if KBParser._is_city_candidate(item)]
         for key in ("data", "result", "items"):
             nested = payload.get(key)
             if isinstance(nested, dict):
                 nested_cities = nested.get("cities")
                 if isinstance(nested_cities, list):
-                    return [item for item in nested_cities if isinstance(item, dict)]
+                    return [item for item in nested_cities if KBParser._is_city_candidate(item)]
             if isinstance(nested, list):
-                return [item for item in nested if isinstance(item, dict)]
+                return [item for item in nested if KBParser._is_city_candidate(item)]
         return []
 
     @staticmethod
@@ -118,10 +126,12 @@ class KBParser:
         for item in regions:
             if not isinstance(item, dict):
                 continue
-            region_id = item.get("id")
+            region_id = KBParser._to_int(item.get("id"))
             region_name = item.get("name")
-            if isinstance(region_id, (int, float)) and isinstance(region_name, str) and region_name.strip():
-                lookup[int(region_id)] = region_name.strip()
+            if not isinstance(region_name, str):
+                region_name = item.get("title")
+            if region_id is not None and isinstance(region_name, str) and region_name.strip():
+                lookup[region_id] = region_name.strip()
         return lookup
 
     @staticmethod
@@ -134,10 +144,12 @@ class KBParser:
             if isinstance(city.get("regionName"), str) and city.get("regionName", "").strip():
                 continue
             region_id = city.get("regionId") or city.get("region_id")
-            if isinstance(region_id, (int, float)):
-                mapped = region_lookup.get(int(region_id))
-                if mapped:
-                    city["regionName"] = mapped
+            region_key = KBParser._to_int(region_id)
+            if region_key is None:
+                continue
+            mapped = region_lookup.get(region_key)
+            if mapped:
+                city["regionName"] = mapped
 
     @staticmethod
     def _format_work_time(raw: Any) -> str | None:
@@ -211,7 +223,7 @@ class KBParser:
         source_url = f"{self.base_url}/api/cities/{city_id}/shops/"
         if shop_id is not None:
             source_url = f"{source_url}#{shop_id}"
-        resolved_city = self._extract_city_name(shop) or city_name
+        resolved_city = self._extract_shop_city_name(shop) or city_name
         resolved_region = self._extract_region_name(shop) or region
         return StoreRecord.build(
             network=self.NETWORK_NAME,
@@ -239,6 +251,15 @@ class KBParser:
     @staticmethod
     def _extract_city_name(payload: dict[str, Any]) -> str | None:
         for key in ("city", "cityName", "name", "town", "locality", "title"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _extract_shop_city_name(payload: dict[str, Any]) -> str | None:
+        # Use only explicit city fields for shop payloads to avoid accidental matches from generic "name".
+        for key in ("city", "cityName", "town", "locality"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -277,3 +298,83 @@ class KBParser:
         if isinstance(region_id, str) and region_id.strip():
             return f"Регион #{region_id.strip()}"
         return None
+
+    @staticmethod
+    def _to_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
+
+    @staticmethod
+    def _is_city_candidate(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        city_id = KBParser._to_int(item.get("id"))
+        if city_id is None:
+            return False
+        city_name = None
+        for key in ("name", "city", "cityName", "town", "locality"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                city_name = value.strip()
+                break
+        if not city_name:
+            return False
+        # Guard against parsing shop payloads as cities when endpoint shape changes.
+        shop_markers = ("address", "fullAddress", "shopNum", "num", "cityId", "lat", "lng")
+        has_shop_markers = any(marker in item for marker in shop_markers)
+        has_region_markers = any(marker in item for marker in ("regionId", "region_id", "regionName", "region_name"))
+        if has_shop_markers and not has_region_markers:
+            return False
+        return True
+
+    @staticmethod
+    def _deduplicate_cities(cities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen_city_ids: set[int] = set()
+        for city in cities:
+            city_id = KBParser._to_int(city.get("id"))
+            if city_id is None:
+                continue
+            if city_id in seen_city_ids:
+                continue
+            seen_city_ids.add(city_id)
+            city["id"] = city_id
+            deduped.append(city)
+        return deduped
+
+    @staticmethod
+    def _deduplicate_stores(stores: list[StoreRecord]) -> list[StoreRecord]:
+        deduped: list[StoreRecord] = []
+        seen_keys: set[str] = set()
+        for store in stores:
+            city_key = KBParser._normalize_dedupe_part(store.city)
+            address_key = KBParser._normalize_dedupe_part(store.address)
+            key = "||".join(
+                (
+                    KBParser._normalize_dedupe_part(store.network),
+                    city_key,
+                    address_key,
+                )
+            )
+            if not city_key and not address_key:
+                key = f"{key}||{KBParser._normalize_dedupe_part(store.source_url)}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(store)
+        return deduped
+
+    @staticmethod
+    def _normalize_dedupe_part(value: str | None) -> str:
+        if not value:
+            return ""
+        return re.sub(r"\s+", " ", value.strip().lower())

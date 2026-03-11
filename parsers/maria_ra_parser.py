@@ -577,9 +577,15 @@ class MariaRaParser:
             "ROUND_CLOCK_SERVICES",
             "OPENING_SOON",
         }
-        if cleaned in technical_regions:
+        cleaned_upper = cleaned.upper()
+        cleaned_lower = cleaned.lower()
+        if cleaned_upper in technical_regions:
+            return None
+        if any(token in cleaned_lower for token in ("selection_wines", "coffee_frame", "round_clock_services", "opening_soon")):
             return None
         if re.fullmatch(r"[A-Z0-9_]{3,}", cleaned):
+            return None
+        if MariaRaParser._looks_like_address(cleaned):
             return None
         if not re.search(r"[А-Яа-яЁё]", cleaned):
             return None
@@ -601,6 +607,8 @@ class MariaRaParser:
         cleaned = MariaRaParser._clean_text(value)
         if not cleaned:
             return None
+        cleaned = re.sub(r"\s+,", ",", cleaned)
+        cleaned = re.sub(r",\s*,+", ", ", cleaned)
         if city_hint and "," in cleaned:
             left, right = [part.strip() for part in cleaned.split(",", 1)]
             if MariaRaParser._normalize_text_token(left) == MariaRaParser._normalize_text_token(city_hint) and right:
@@ -619,6 +627,13 @@ class MariaRaParser:
     def _clean_city_and_address(city: str | None, address: str | None) -> tuple[str | None, str | None]:
         cleaned_city = MariaRaParser._clean_text(city)
         cleaned_address = MariaRaParser._clean_address(address)
+
+        if not cleaned_city and cleaned_address:
+            split_city, split_address = MariaRaParser._split_city_and_address(cleaned_address)
+            if split_city:
+                cleaned_city = split_city
+            if split_address:
+                cleaned_address = split_address
 
         if cleaned_city:
             # Handle merged city+address in one field.

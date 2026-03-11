@@ -42,3 +42,42 @@ def test_normalize_shop_uses_shop_city_region_as_priority() -> None:
 
     assert record.city == "Новосибирск"
     assert record.region == "Новосибирская область"
+
+
+def test_extract_city_list_filters_shop_like_payload() -> None:
+    payload = [
+        {"id": 1, "name": "Томск", "regionId": 10},
+        {"id": 2, "address": "ул. Ленина, 1", "cityId": 1, "lat": 55.0, "lng": 82.0},
+    ]
+
+    cities = KBParser._extract_city_list(payload)
+
+    assert len(cities) == 1
+    assert cities[0]["name"] == "Томск"
+
+
+def test_parse_deduplicates_stores_by_network_city_address() -> None:
+    class FakeClient:
+        def get_json(self, url: str):  # type: ignore[no-untyped-def]
+            if "cities/list" in url:
+                return {
+                    "cities": [
+                        {"id": 1, "name": "Томск", "regionId": 10},
+                        {"id": 1, "name": "Томск", "regionId": 10},
+                    ],
+                    "regions": [{"id": 10, "name": "Томская область"}],
+                }
+            if "/api/cities/1/shops/" in url:
+                return [
+                    {"id": 101, "address": "ул. Ленина, 1"},
+                    {"id": 102, "address": "ул. Ленина, 1"},
+                ]
+            return []
+
+    parser = KBParser(client=FakeClient())
+
+    stores = parser.parse()
+
+    assert len(stores) == 1
+    assert stores[0].city == "Томск"
+    assert stores[0].region == "Томская область"
