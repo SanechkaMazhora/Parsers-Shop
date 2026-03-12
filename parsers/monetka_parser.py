@@ -32,10 +32,10 @@ class MonetkaParser:
         """Collect store pages and normalize parsed content."""
         stores: list[StoreRecord] = []
         region_pages = self._collect_region_pages()
-        self.logger.info("Monetka: loaded %s region pages", len(region_pages))
+        self.logger.info("Monetka: discovered %s regions", len(region_pages))
         city_hints = self._collect_city_hints(region_pages)
         city_pages = sorted(city_hints)
-        self.logger.info("Monetka: loaded %s city pages", len(city_pages))
+        self.logger.info("Monetka: discovered %s cities", len(city_pages))
 
         store_context_by_url: dict[str, tuple[str | None, str | None]] = {}
         for city_url in city_pages:
@@ -52,7 +52,8 @@ class MonetkaParser:
                 if store_url not in store_context_by_url:
                     store_context_by_url[store_url] = city_context
 
-        self.logger.info("Monetka: loaded %s unique store pages", len(store_context_by_url))
+        self.logger.info("Monetka: discovered %s unique store pages", len(store_context_by_url))
+        parsed_store_pages = 0
         for store_url in sorted(store_context_by_url):
             context_city, context_region = store_context_by_url.get(store_url, (None, None))
             try:
@@ -65,9 +66,14 @@ class MonetkaParser:
                         context_region=context_region,
                     )
                 )
+                parsed_store_pages += 1
             except Exception as exc:
                 self.logger.warning("Monetka: failed store page %s: %s", store_url, exc)
-        return stores
+        deduped = self._deduplicate_stores(stores)
+        if len(deduped) != len(stores):
+            self.logger.info("Monetka: deduplicated stores %s -> %s", len(stores), len(deduped))
+        self.logger.info("Monetka: parsed %s store pages", parsed_store_pages)
+        return deduped
 
     def _collect_city_pages(self) -> list[str]:
         return sorted(self._collect_city_hints().keys())
@@ -97,9 +103,6 @@ class MonetkaParser:
                     self.logger.info("Monetka: seed unavailable %s: %s", candidate_url, exc)
                     continue
 
-                if self._is_region_page_path(urlparse(candidate_url).path):
-                    regions.add(self._normalize_region_url(candidate_url))
-
                 for region_link in self._extract_region_links(html, candidate_url):
                     regions.add(region_link)
                 for city_link, _ in self._extract_city_links_with_hint(html, candidate_url):
@@ -112,7 +115,7 @@ class MonetkaParser:
         return sorted(regions)
 
     def _collect_city_hints_for_region(self, region_url: str) -> dict[str, str]:
-        queue: deque[str] = deque(self._seed_candidates(region_url))
+        queue: deque[str] = deque(self._build_region_city_seed_candidates(region_url))
         visited: set[str] = set()
         result: dict[str, str] = {}
         max_pages = 40
@@ -241,12 +244,20 @@ class MonetkaParser:
         seen: set[str] = set()
         for href in self._iter_hrefs(soup):
             absolute = urljoin(base_url, href)
-            normalized = self._normalize_region_url(absolute)
+            parsed = urlparse(absolute)
+            if parsed.fragment:
+                continue
+            normalized: str | None = None
+            if self._is_region_change_path(parsed.path):
+                normalized = self._normalize_region_change_url(absolute)
+            elif self._is_region_page_path(parsed.path):
+                normalized = self._normalize_region_url(absolute)
+            if not normalized:
+                continue
             if normalized in seen:
                 continue
-            if self._is_region_page_path(urlparse(normalized).path):
-                seen.add(normalized)
-                yield normalized
+            seen.add(normalized)
+            yield normalized
 
     @staticmethod
     def _is_region_page_path(path: str) -> bool:
@@ -263,6 +274,18 @@ class MonetkaParser:
         return idx + 1 == len(parts)
 
     @staticmethod
+    def _is_region_change_path(path: str) -> bool:
+        normalized = path.rstrip("/")
+        if not normalized:
+            return False
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) < 2:
+            return False
+        if parts[-1].lower() != "change":
+            return False
+        return "shops_map" not in parts
+
+    @staticmethod
     def _normalize_region_url(url: str) -> str:
         parsed = urlparse(url)
         parts = [part for part in parsed.path.split("/") if part]
@@ -273,6 +296,35 @@ class MonetkaParser:
         region_parts = parts[: idx + 1]
         path = "/" + "/".join(region_parts) + "/"
         return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+    @staticmethod
+    def _normalize_region_change_url(url: str) -> str:
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        if not path:
+            path = "/"
+        if not path.endswith("/"):
+            path = f"{path}/"
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+    def _build_region_city_seed_candidates(self, region_url: str) -> list[str]:
+        candidates: list[str] = []
+        parsed_region = urlparse(region_url)
+        if self._is_region_change_path(parsed_region.path):
+            candidates.append(self._normalize_region_change_url(region_url))
+        else:
+            candidates.extend(self._seed_candidates(region_url))
+
+        region_page_url = self._region_change_to_region_url(region_url)
+        if region_page_url:
+            candidates.extend(self._seed_candidates(region_page_url))
+
+        normalized_region = self._normalize_region_url(region_url)
+        if self._is_region_page_path(urlparse(normalized_region).path):
+            candidates.extend(self._seed_candidates(normalized_region))
+
+        # Keep stable order and remove duplicates.
+        return list(dict.fromkeys(candidates))
 
     @staticmethod
     def _normalize_city_url(url: str) -> str:
@@ -293,6 +345,18 @@ class MonetkaParser:
             return None
         region_parts = parts[: idx + 1]
         path = "/" + "/".join(region_parts) + "/"
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+    @staticmethod
+    def _region_change_to_region_url(region_url: str) -> str | None:
+        parsed = urlparse(region_url)
+        parts = [part for part in parsed.path.split("/") if part]
+        if not parts or parts[-1].lower() != "change":
+            return None
+        region_parts = parts[:-1]
+        if not region_parts:
+            return None
+        path = "/" + "/".join(region_parts + ["shops_map"]) + "/"
         return f"{parsed.scheme}://{parsed.netloc}{path}"
 
     def _extract_city_context(
@@ -685,6 +749,30 @@ class MonetkaParser:
     @staticmethod
     def _normalize_token(value: str) -> str:
         return re.sub(r"[^a-zа-я0-9]+", "", value.lower())
+
+    @staticmethod
+    def _deduplicate_stores(stores: list[StoreRecord]) -> list[StoreRecord]:
+        deduped: list[StoreRecord] = []
+        seen_keys: set[str] = set()
+        for store in stores:
+            key = "||".join(
+                (
+                    MonetkaParser._normalize_dedupe_part(store.network),
+                    MonetkaParser._normalize_dedupe_part(store.city),
+                    MonetkaParser._normalize_dedupe_part(store.address),
+                )
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(store)
+        return deduped
+
+    @staticmethod
+    def _normalize_dedupe_part(value: str | None) -> str:
+        if not value:
+            return ""
+        return re.sub(r"\s+", " ", value.strip().lower())
 
     @staticmethod
     def _is_probably_address(value: str) -> bool:
