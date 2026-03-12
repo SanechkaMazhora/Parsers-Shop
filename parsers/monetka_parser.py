@@ -82,40 +82,39 @@ class MonetkaParser:
         if region_pages is None:
             region_pages = self._collect_region_pages()
         result: dict[str, str] = {}
+        for seed_url in self.seed_urls:
+            try:
+                html = self.client.get_text(seed_url)
+            except Exception as exc:
+                self.logger.info("Monetka: seed city list unavailable %s: %s", seed_url, exc)
+                continue
+            for city_url, city_hint in self._extract_city_links_with_hint(html, seed_url):
+                if city_url not in result:
+                    result[city_url] = city_hint
         for region_url in region_pages:
             for city_url, city_hint in self._collect_city_hints_for_region(region_url).items():
                 if city_url not in result:
                     result[city_url] = city_hint
         return result
 
-    @staticmethod
-    def _seed_candidates(url: str) -> tuple[str, str, str]:
-        normalized = url.rstrip("/")
-        return (normalized + "/", normalized + "/list", normalized + "/list/")
-
     def _collect_region_pages(self) -> list[str]:
         regions: set[str] = set()
         for url in self.seed_urls:
-            for candidate_url in self._seed_candidates(url):
-                try:
-                    html = self.client.get_text(candidate_url)
-                except Exception as exc:
-                    self.logger.info("Monetka: seed unavailable %s: %s", candidate_url, exc)
-                    continue
+            try:
+                html = self.client.get_text(url)
+            except Exception as exc:
+                self.logger.info("Monetka: seed unavailable %s: %s", url, exc)
+                continue
 
-                for region_link in self._extract_region_links(html, candidate_url):
-                    regions.add(region_link)
-                for city_link, _ in self._extract_city_links_with_hint(html, candidate_url):
-                    region_link = self._city_url_to_region_url(city_link)
-                    if region_link:
-                        regions.add(region_link)
+            for region_link in self._extract_region_links(html, url):
+                regions.add(region_link)
 
         if not regions:
-            regions.add(f"{self.base_url}/shops_map/")
+            self.logger.warning("Monetka: no region links ending with '/change' found on seed pages")
         return sorted(regions)
 
     def _collect_city_hints_for_region(self, region_url: str) -> dict[str, str]:
-        queue: deque[str] = deque(self._build_region_city_seed_candidates(region_url))
+        queue: deque[str] = deque([region_url])
         visited: set[str] = set()
         result: dict[str, str] = {}
         max_pages = 40
@@ -126,17 +125,25 @@ class MonetkaParser:
                 continue
             visited.add(page_url)
 
+            extraction_base_url = page_url
             try:
-                html = self.client.get_text(page_url)
+                request_headers = None
+                if self._is_region_change_path(urlparse(page_url).path):
+                    # Region '/change' links redirect to '/{region}/shops_map' only with shops map referer.
+                    request_headers = {"Referer": f"{self.base_url}/shops_map/"}
+                    resolved = self._region_change_to_shops_map_url(page_url)
+                    if resolved:
+                        extraction_base_url = resolved
+                html = self.client.get_text(page_url, headers=request_headers)
             except Exception as exc:
                 self.logger.info("Monetka: region page unavailable %s: %s", page_url, exc)
                 continue
 
-            for link, city_hint in self._extract_city_links_with_hint(html, page_url):
+            for link, city_hint in self._extract_city_links_with_hint(html, extraction_base_url):
                 if link not in result:
                     result[link] = city_hint
 
-            for next_page in self._extract_pagination_links(html, page_url):
+            for next_page in self._extract_pagination_links(html, extraction_base_url):
                 if next_page not in visited:
                     queue.append(next_page)
 
@@ -183,17 +190,13 @@ class MonetkaParser:
     def _extract_city_links_with_hint(self, html: str, base_url: str) -> Iterable[tuple[str, str]]:
         soup = BeautifulSoup(html, "lxml")
         seen: set[str] = set()
-        service_tokens = {"list", "department", "feedback", "ajax"}
-        for anchor in soup.select("a[href]"):
+        for anchor in soup.select("ul.shop_city_list_ul a[href]"):
             href = anchor.get("href")
             if not href:
                 continue
-            absolute = self._normalize_city_url(urljoin(base_url, href))
-            parsed = urlparse(absolute)
-            path = parsed.path.rstrip("/")
+            absolute = self._strip_url_fragment(urljoin(base_url, href))
+            path = urlparse(absolute).path.rstrip("/")
             if not path or "/shops_map" not in path:
-                continue
-            if parsed.fragment:
                 continue
             if self._is_store_path(path):
                 continue
@@ -205,9 +208,6 @@ class MonetkaParser:
                 # Skip generic '/shops_map' pages; keep only concrete city pages.
                 continue
             if idx + 2 != len(parts):
-                continue
-            city_token = parts[idx + 1].lower()
-            if city_token in service_tokens:
                 continue
             if absolute not in seen:
                 seen.add(absolute)
@@ -247,31 +247,13 @@ class MonetkaParser:
             parsed = urlparse(absolute)
             if parsed.fragment:
                 continue
-            normalized: str | None = None
-            if self._is_region_change_path(parsed.path):
-                normalized = self._normalize_region_change_url(absolute)
-            elif self._is_region_page_path(parsed.path):
-                normalized = self._normalize_region_url(absolute)
-            if not normalized:
+            if not self._is_region_change_path(parsed.path):
                 continue
-            if normalized in seen:
+            cleaned = self._strip_url_fragment(absolute)
+            if cleaned in seen:
                 continue
-            seen.add(normalized)
-            yield normalized
-
-    @staticmethod
-    def _is_region_page_path(path: str) -> bool:
-        normalized = path.rstrip("/")
-        if not normalized:
-            return False
-        if MonetkaParser._is_store_path(normalized):
-            return False
-        parts = [part for part in normalized.split("/") if part]
-        if "shops_map" not in parts:
-            return False
-        idx = parts.index("shops_map")
-        # Region pages end at '/shops_map' (with optional region slug before it).
-        return idx + 1 == len(parts)
+            seen.add(cleaned)
+            yield cleaned
 
     @staticmethod
     def _is_region_change_path(path: str) -> bool:
@@ -286,77 +268,17 @@ class MonetkaParser:
         return "shops_map" not in parts
 
     @staticmethod
-    def _normalize_region_url(url: str) -> str:
+    def _strip_url_fragment(url: str) -> str:
         parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
+
+    @staticmethod
+    def _region_change_to_shops_map_url(region_change_url: str) -> str | None:
+        parsed = urlparse(region_change_url)
         parts = [part for part in parsed.path.split("/") if part]
-        if "shops_map" not in parts:
-            path = parsed.path.rstrip("/") + "/"
-            return f"{parsed.scheme}://{parsed.netloc}{path}"
-        idx = parts.index("shops_map")
-        region_parts = parts[: idx + 1]
-        path = "/" + "/".join(region_parts) + "/"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-    @staticmethod
-    def _normalize_region_change_url(url: str) -> str:
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/")
-        if not path:
-            path = "/"
-        if not path.endswith("/"):
-            path = f"{path}/"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-    def _build_region_city_seed_candidates(self, region_url: str) -> list[str]:
-        candidates: list[str] = []
-        parsed_region = urlparse(region_url)
-        if self._is_region_change_path(parsed_region.path):
-            candidates.append(self._normalize_region_change_url(region_url))
-        else:
-            candidates.extend(self._seed_candidates(region_url))
-
-        region_page_url = self._region_change_to_region_url(region_url)
-        if region_page_url:
-            candidates.extend(self._seed_candidates(region_page_url))
-
-        normalized_region = self._normalize_region_url(region_url)
-        if self._is_region_page_path(urlparse(normalized_region).path):
-            candidates.extend(self._seed_candidates(normalized_region))
-
-        # Keep stable order and remove duplicates.
-        return list(dict.fromkeys(candidates))
-
-    @staticmethod
-    def _normalize_city_url(url: str) -> str:
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/")
-        if not path:
-            path = "/"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-    @staticmethod
-    def _city_url_to_region_url(city_url: str) -> str | None:
-        parsed = urlparse(city_url)
-        parts = [part for part in parsed.path.split("/") if part]
-        if "shops_map" not in parts:
+        if len(parts) < 2 or parts[-1].lower() != "change":
             return None
-        idx = parts.index("shops_map")
-        if idx + 1 >= len(parts):
-            return None
-        region_parts = parts[: idx + 1]
-        path = "/" + "/".join(region_parts) + "/"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-    @staticmethod
-    def _region_change_to_region_url(region_url: str) -> str | None:
-        parsed = urlparse(region_url)
-        parts = [part for part in parsed.path.split("/") if part]
-        if not parts or parts[-1].lower() != "change":
-            return None
-        region_parts = parts[:-1]
-        if not region_parts:
-            return None
-        path = "/" + "/".join(region_parts + ["shops_map"]) + "/"
+        path = "/" + "/".join(parts[:-1] + ["shops_map"])
         return f"{parsed.scheme}://{parsed.netloc}{path}"
 
     def _extract_city_context(
