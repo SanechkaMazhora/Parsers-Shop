@@ -119,6 +119,33 @@ def test_collect_city_hints_for_region_uses_shop_city_list_links_only() -> None:
     assert parser.client.headers_seen[0] == {"Referer": "https://www.monetka.ru/shops_map/"}  # type: ignore[attr-defined]
 
 
+def test_is_valid_city_page_path_accepts_only_strict_city_paths() -> None:
+    assert MonetkaParser._is_valid_city_page_path("/urfo/shops_map/Aramil")
+    assert MonetkaParser._is_valid_city_page_path("/Nsk_obl/shops_map/Novosibirsk")
+    assert not MonetkaParser._is_valid_city_page_path("/shops_map/Aramil")
+    assert not MonetkaParser._is_valid_city_page_path("/urfo/shops_map")
+    assert not MonetkaParser._is_valid_city_page_path("/urfo/shops_map/+Purovsk")
+    assert not MonetkaParser._is_valid_city_page_path("/shops_map/ekb/1241")
+
+
+def test_extract_city_links_with_hint_filters_malformed_hrefs() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <ul class="shop_city_list_ul">
+      <li><a href="/urfo/shops_map/Aramil">Aramil</a></li>
+      <li><a href="/urfo/shops_map/+Purovsk">Bad Plus</a></li>
+      <li><a href="javascript:void(0)">JS</a></li>
+      <li><a href="#">Hash</a></li>
+      <li><a href="  ">Empty</a></li>
+    </ul>
+    """
+
+    links = list(parser._extract_city_links_with_hint(html, "https://www.monetka.ru/Nsk_obl/change"))
+
+    assert links == [("https://www.monetka.ru/urfo/shops_map/Aramil", "Aramil")]
+    assert parser._city_links_filtered_count == 4
+
+
 def test_collect_city_hints_includes_seed_city_list_for_active_region() -> None:
     class FakeClient:
         calls: list[str] = []
