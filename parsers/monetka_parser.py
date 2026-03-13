@@ -33,9 +33,13 @@ class MonetkaParser:
         stores: list[StoreRecord] = []
         region_pages = self._collect_region_pages()
         self.logger.info("Monetka: discovered %s regions", len(region_pages))
+        if region_pages:
+            self.logger.info("Monetka: region examples: %s", ", ".join(region_pages[:5]))
         city_hints = self._collect_city_hints(region_pages)
         city_pages = sorted(city_hints)
         self.logger.info("Monetka: discovered %s cities", len(city_pages))
+        if city_pages:
+            self.logger.info("Monetka: city examples: %s", ", ".join(city_pages[:5]))
 
         store_context_by_url: dict[str, tuple[str | None, str | None]] = {}
         for city_url in city_pages:
@@ -53,6 +57,9 @@ class MonetkaParser:
                     store_context_by_url[store_url] = city_context
 
         self.logger.info("Monetka: discovered %s unique store pages", len(store_context_by_url))
+        if store_context_by_url:
+            store_examples = sorted(store_context_by_url)[:5]
+            self.logger.info("Monetka: store examples: %s", ", ".join(store_examples))
         parsed_store_pages = 0
         for store_url in sorted(store_context_by_url):
             context_city, context_region = store_context_by_url.get(store_url, (None, None))
@@ -88,11 +95,16 @@ class MonetkaParser:
             except Exception as exc:
                 self.logger.info("Monetka: seed city list unavailable %s: %s", seed_url, exc)
                 continue
+            seed_city_count = 0
             for city_url, city_hint in self._extract_city_links_with_hint(html, seed_url):
                 if city_url not in result:
                     result[city_url] = city_hint
+                    seed_city_count += 1
+            self.logger.info("Monetka: discovered %s cities from current region page %s", seed_city_count, seed_url)
         for region_url in region_pages:
-            for city_url, city_hint in self._collect_city_hints_for_region(region_url).items():
+            region_city_hints = self._collect_city_hints_for_region(region_url)
+            self.logger.info("Monetka: region %s -> %s city links", region_url, len(region_city_hints))
+            for city_url, city_hint in region_city_hints.items():
                 if city_url not in result:
                     result[city_url] = city_hint
         return result
@@ -114,39 +126,20 @@ class MonetkaParser:
         return sorted(regions)
 
     def _collect_city_hints_for_region(self, region_url: str) -> dict[str, str]:
-        queue: deque[str] = deque([region_url])
-        visited: set[str] = set()
         result: dict[str, str] = {}
-        max_pages = 40
+        request_headers = None
+        if self._is_region_change_path(urlparse(region_url).path):
+            # Region '/change' must be loaded as-is; referer keeps region context.
+            request_headers = {"Referer": f"{self.base_url}/shops_map/"}
+        try:
+            html = self.client.get_text(region_url, headers=request_headers)
+        except Exception as exc:
+            self.logger.info("Monetka: region page unavailable %s: %s", region_url, exc)
+            return result
 
-        while queue and len(visited) < max_pages:
-            page_url = queue.popleft()
-            if page_url in visited:
-                continue
-            visited.add(page_url)
-
-            extraction_base_url = page_url
-            try:
-                request_headers = None
-                if self._is_region_change_path(urlparse(page_url).path):
-                    # Region '/change' links redirect to '/{region}/shops_map' only with shops map referer.
-                    request_headers = {"Referer": f"{self.base_url}/shops_map/"}
-                    resolved = self._region_change_to_shops_map_url(page_url)
-                    if resolved:
-                        extraction_base_url = resolved
-                html = self.client.get_text(page_url, headers=request_headers)
-            except Exception as exc:
-                self.logger.info("Monetka: region page unavailable %s: %s", page_url, exc)
-                continue
-
-            for link, city_hint in self._extract_city_links_with_hint(html, extraction_base_url):
-                if link not in result:
-                    result[link] = city_hint
-
-            for next_page in self._extract_pagination_links(html, extraction_base_url):
-                if next_page not in visited:
-                    queue.append(next_page)
-
+        for link, city_hint in self._extract_city_links_with_hint(html, region_url):
+            if link not in result:
+                result[link] = city_hint
         return result
 
     def _collect_store_links_for_city(
@@ -271,15 +264,6 @@ class MonetkaParser:
     def _strip_url_fragment(url: str) -> str:
         parsed = urlparse(url)
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}" + (f"?{parsed.query}" if parsed.query else "")
-
-    @staticmethod
-    def _region_change_to_shops_map_url(region_change_url: str) -> str | None:
-        parsed = urlparse(region_change_url)
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) < 2 or parts[-1].lower() != "change":
-            return None
-        path = "/" + "/".join(parts[:-1] + ["shops_map"])
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
 
     def _extract_city_context(
         self,
