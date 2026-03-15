@@ -511,6 +511,7 @@ class MariaRaParser:
         region = self._clean_region(region_raw)
         work_time = store.get("work_time") if isinstance(store.get("work_time"), str) else None
         lat, lng = self._extract_coords(store)
+        source_url = self._build_source_url(address=address, latitude=lat, longitude=lng)
 
         phone = store.get("phone")
         if not isinstance(phone, str):
@@ -533,7 +534,7 @@ class MariaRaParser:
             phone=phone,
             store_format=store_format,
             status=status,
-            source_url=self.map_url,
+            source_url=source_url,
         )
 
     @staticmethod
@@ -668,6 +669,20 @@ class MariaRaParser:
             if isinstance(coords, (list, tuple)) and len(coords) >= 2:
                 lng, lat = coords[0], coords[1]  # GeoJSON order is [lng, lat]
         return MariaRaParser._to_float(lat), MariaRaParser._to_float(lng)
+
+    def _build_source_url(
+        self,
+        *,
+        address: str | None,
+        latitude: float | None,
+        longitude: float | None,
+    ) -> str:
+        if latitude is not None and longitude is not None:
+            return f"{self.map_url}#store={latitude:.6f},{longitude:.6f}"
+        address_token = self._normalize_text_token(address)
+        if address_token:
+            return f"{self.map_url}#store={address_token}"
+        return self.map_url
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

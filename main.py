@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 
 from core.excel_export import export_stores_to_excel
@@ -33,6 +33,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["kb", "monetka", "maria_ra"],
         help="Run parser only for selected network",
     )
+    run_parser.add_argument(
+        "--output",
+        default="output/stores.xlsx",
+        help="Path to the generated Excel report",
+    )
+    run_parser.add_argument(
+        "--snapshot",
+        default=None,
+        help="Optional path to the diff snapshot JSON file",
+    )
     return parser
 
 
@@ -48,28 +58,59 @@ def get_selected_parsers(network: str | None) -> list[tuple[str, ParserInterface
     return list(mapping.values())
 
 
-def run(network: str | None = None) -> int:
+def run(
+    network: str | None = None,
+    *,
+    output_path: str = "output/stores.xlsx",
+    snapshot_path: str | None = None,
+) -> int:
     """Run selected parsers and export combined result."""
     setup_logging()
     logger = logging.getLogger("main")
-    Path("output").mkdir(exist_ok=True)
-    Path("logs").mkdir(exist_ok=True)
+    started_at = perf_counter()
+
+    selected_parsers = get_selected_parsers(network)
+    logger.info(
+        "Run started: parsers=%s output=%s snapshot=%s",
+        ",".join(parser_name for parser_name, _ in selected_parsers),
+        output_path,
+        snapshot_path or "<auto>",
+    )
 
     all_stores: list[StoreRecord] = []
+    failed_parsers = 0
+
     try:
-        for parser_name, parser_instance in get_selected_parsers(network):
+        for parser_name, parser_instance in selected_parsers:
             logger.info("Running parser: %s", parser_name)
             try:
                 stores = parser_instance.parse()
-                logger.info("Parser %s completed: %s stores", parser_name, len(stores))
-                all_stores.extend(stores)
             except Exception as exc:
+                failed_parsers += 1
                 logger.error("Parser %s failed: %s", parser_name, exc, exc_info=True)
+                continue
+
+            logger.info("Parser %s completed: %s stores", parser_name, len(stores))
+            all_stores.extend(stores)
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
 
-    export_stores_to_excel(all_stores, output_path="output/stores.xlsx")
-    logger.info("Export completed: output/stores.xlsx (%s stores)", len(all_stores))
+    diff_result = export_stores_to_excel(
+        all_stores,
+        output_path=output_path,
+        snapshot_path=snapshot_path,
+    )
+    duration_seconds = perf_counter() - started_at
+    logger.info(
+        "Run finished: stores=%s added=%s removed=%s changed=%s duration_seconds=%.2f",
+        len(all_stores),
+        len(diff_result.added),
+        len(diff_result.removed),
+        len(diff_result.changed),
+        duration_seconds,
+    )
+    if failed_parsers:
+        logger.warning("Run completed with parser failures: %s of %s", failed_parsers, len(selected_parsers))
     return 0
 
 
@@ -77,12 +118,18 @@ def main() -> int:
     """CLI main function."""
     parser = build_parser()
     args = parser.parse_args()
+
     if args.command is None:
-        return run(network=None)
+        return run()
     if args.command != "run":
         parser.print_help()
         return 1
-    return run(network=args.network)
+
+    return run(
+        network=args.network,
+        output_path=args.output,
+        snapshot_path=args.snapshot,
+    )
 
 
 if __name__ == "__main__":

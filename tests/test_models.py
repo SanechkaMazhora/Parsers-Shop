@@ -15,7 +15,8 @@ def test_store_record_build_sets_required_fields() -> None:
     assert record.city == "Novosibirsk"
     assert record.address == "Lenina 1"
     assert record.source_url == "https://example.com/store/1"
-    assert isinstance(record.parsed_at, str)
+    assert isinstance(record.collected_at, str)
+    assert record.parsed_at == record.collected_at
 
 
 def test_store_record_to_dict_contains_all_keys() -> None:
@@ -28,12 +29,29 @@ def test_store_record_to_dict_contains_all_keys() -> None:
         "city",
         "address",
         "work_time",
-        "lat",
-        "lng",
+        "latitude",
+        "longitude",
         "phone",
         "store_format",
         "status",
         "source_url",
-        "parsed_at",
+        "collected_at",
     }
     assert set(data.keys()) == expected_keys
+
+
+def test_store_record_build_normalizes_address_and_legacy_aliases() -> None:
+    record = StoreRecord.build(
+        network="N",
+        city="Novosibirsk",
+        address=" Novosibirsk,  ул. Ленина, 1 ",
+        lat="55.03",
+        lng="82.92",
+        source_url="https://example.com/store/1",
+    )
+
+    assert record.address == "ул. Ленина, 1"
+    assert record.latitude == 55.03
+    assert record.longitude == 82.92
+    assert record.lat == 55.03
+    assert record.lng == 82.92

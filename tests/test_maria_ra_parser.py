@@ -55,3 +55,17 @@ def test_clean_city_and_address_extracts_city_from_address_when_city_missing() -
 
     assert city == "Новосибирск"
     assert address == "ул. Советская, 10"
+
+
+def test_normalize_store_builds_unique_source_url_from_coordinates() -> None:
+    parser = MariaRaParser(client=None)
+
+    record = parser._normalize_store(
+        {
+            "city": "Новосибирск",
+            "address": "ул. Ленина, 1",
+            "coords": [82.92, 55.03],
+        }
+    )
+
+    assert record.source_url == "https://www.maria-ra.ru/o-kompanii/karta-seti/#store=55.030000,82.920000"

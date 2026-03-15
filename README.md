@@ -1,57 +1,34 @@
 # project_parser
 
-Парсер торговых сетей (MVP), который собирает данные о магазинах:
+Проект собирает данные о магазинах из официальных источников трёх сетей:
 
 - Красное & Белое
 - Монетка
 - Мария-Ра
 
-Система приводит данные к единой модели, сохраняет Excel-отчет и пишет логи выполнения.
+Все парсеры приводят результат к единой модели `StoreRecord`, сохраняют Excel-отчёт и поддерживают diff относительно предыдущего запуска.
 
-## Цель проекта
+## Что собирается
 
-Автоматизировать сбор адресов и атрибутов магазинов из разных источников (REST API, HTML, встроенный JS) в единый формат:
+Базовые поля записи:
 
 - `network`
 - `region`
 - `city`
 - `address`
 - `work_time`
-- `lat`
-- `lng`
+- `latitude`
+- `longitude`
+- `source_url`
+- `collected_at`
+
+Дополнительно, если источник отдаёт данные, сохраняются:
+
 - `phone`
 - `store_format`
 - `status`
-- `source_url`
-- `parsed_at`
 
-## Архитектура
-
-```text
-project_parser/
-  parsers/
-    kb_parser.py
-    monetka_parser.py
-    maria_ra_parser.py
-  core/
-    http_client.py
-    models.py
-    excel_export.py
-    logging_config.py
-  tests/
-  logs/
-  output/
-  main.py
-  requirements.txt
-  implementation_plan.md
-```
-
-## Parser Strategies
-
-- `KBParser` uses `/api/cities/list/` for city+region metadata and then loads stores via `/api/cities/{id}/shops/`.
-- `MonetkaParser` uses HTML parsing flow (`seed -> city pages -> store pages`) and extracts city/region per individual store page.
-- `MariaRaParser` is requests-first (inline JS, external JS, HTML-embedded map payloads) with optional Playwright fallback.
-- In some Linux environments, Playwright may require additional system libraries (for example `libnspr4` and related dependencies). If unavailable, fallback is skipped with a warning.
+Если поле отсутствует на сайте, в итоговой модели сохраняется `None`.
 
 ## Установка
 
@@ -61,7 +38,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Для fallback в `MariaRaParser`:
+Для fallback в `MariaRaParser` при необходимости можно установить браузер Playwright:
 
 ```bash
 playwright install chromium
@@ -72,11 +49,10 @@ playwright install chromium
 Запуск всех парсеров:
 
 ```bash
-python main.py
 python main.py run
 ```
 
-Запуск отдельной сети:
+Запуск одной сети:
 
 ```bash
 python main.py run --network kb
@@ -84,35 +60,61 @@ python main.py run --network monetka
 python main.py run --network maria_ra
 ```
 
-Если один парсер падает, остальные продолжают работу.
+Дополнительные параметры CLI:
 
-## Excel-результат
+```bash
+python main.py run --output output/stores.xlsx
+python main.py run --snapshot output/stores_snapshot.json
+```
 
-Файл: `output/stores.xlsx`
+`python main.py` без подкоманды тоже запускает полный сбор для обратной совместимости.
 
-Листы:
+## Выходные файлы
 
-1. `Актуальные данные` — полный актуальный срез.
-2. `Изменения` — сравнение с предыдущим файлом по ключу `(network, city, address)`.
-3. `Статистика` — агрегаты по количеству магазинов.
+После запуска проект создаёт:
 
-Лист `Изменения` содержит:
+- `output/stores.xlsx`
+- `output/stores_snapshot.json`
+- `logs/parser.log`
 
-- `network`
-- `city`
-- `address`
-- `change_type` (`added`, `removed`, `updated:<field>`)
-- `old_value`
-- `new_value`
-- `detected_at`
+### Листы Excel
 
-Отслеживаемые поля обновлений: `work_time`, `phone`, `store_format`, `status`.
+`Актуальные данные`
 
-## Логирование
+- полный текущий срез магазинов
 
-- Файл: `logs/parser.log`
-- Уровни: `INFO`, `WARNING`, `ERROR`
-- Есть вывод в консоль и timestamp в каждой записи.
+`Изменения`
+
+- `added` — новые магазины
+- `removed` — исчезнувшие магазины
+- `changed` — магазины, у которых изменились поля
+
+`Статистика`
+
+- количество магазинов по сетям
+
+Diff строится по стабильному ключу и использует отдельный snapshot JSON, а не предыдущий Excel-файл.
+
+## Структура проекта
+
+```text
+project_parser/
+  core/
+    diff.py
+    excel_export.py
+    http_client.py
+    logging_config.py
+    models.py
+  parsers/
+    kb_parser.py
+    maria_ra_parser.py
+    monetka_parser.py
+  tests/
+  docs/
+  main.py
+  requirements.txt
+  pytest.ini
+```
 
 ## Тесты
 
@@ -120,14 +122,16 @@ python main.py run --network maria_ra
 python -m pytest -q
 ```
 
-Базово покрыто:
+Покрыты как минимум:
 
-- модель `StoreRecord`
-- формирование Excel и листов
-- часть нормализации в парсерах
+- модель данных
+- diff-механизм
+- Excel-генерация
+- критичные части нормализации парсеров
 
-## Известные ограничения
+## Ограничения парсинга
 
-- Внешние сайты могут менять структуру HTML/JS и endpoint-ы.
-- Для некоторых магазинов часть полей недоступна в источнике и сохраняется как `None`.
-- `Мария-Ра` использует многоступенчатый подход; fallback на Playwright требует установленный браузер.
+- внешние сайты могут менять HTML, JS и внутренние endpoint-ы без предупреждения
+- `Мария-Ра` использует многоступенчатое извлечение и Playwright fallback не гарантирован без установленного браузера
+- `Монетка` публикует данные в HTML-структуре, поэтому часть логики опирается на эвристику
+- корректность diff зависит от того, что сеть продолжает отдавать стабильные URL/координаты магазинов

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 pytest-cache-files-*/
@@ -10,6 +11,8 @@ pytest-cache-files-*/
 # Virtual envs
 .venv/
 .venv*/
+.venv_local/
+.venv-wsl/
 venv/
 .env
 
@@ -25,7 +28,10 @@ __docx.zip
 # IDE/editor
 .vscode/
 .idea/
+Thumbs.db
+.DS_Store
 
 # Runtime outputs
 output/
 logs/
+*.log

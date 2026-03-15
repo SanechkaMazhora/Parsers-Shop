@@ -7,3 +7,4 @@ openpyxl
 python-dotenv
 pydantic
 tenacity
+pytest
