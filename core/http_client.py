@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import requests
@@ -14,8 +15,8 @@ from urllib3.util.retry import Retry
 class HttpClient:
     """Small wrapper around requests.Session with retry support."""
 
-    def __init__(self, timeout: int = 20) -> None:
-        self.timeout = timeout
+    def __init__(self, timeout: int | None = None) -> None:
+        self.timeout = timeout if timeout is not None else self._load_timeout_from_env()
         self.logger = logging.getLogger(__name__)
         self.session = requests.Session()
         self.session.headers.update(
@@ -39,13 +40,30 @@ class HttpClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
+    @staticmethod
+    def _load_timeout_from_env() -> int:
+        raw_value = os.getenv("STORE_PARSER_TIMEOUT")
+        if raw_value:
+            try:
+                parsed = int(raw_value)
+                if parsed > 0:
+                    return parsed
+            except ValueError:
+                pass
+        return 20
+
     def get_text(self, url: str, **kwargs: Any) -> str:
         """Load URL and return response text."""
+        text, _final_url = self.get_text_with_final_url(url, **kwargs)
+        return text
+
+    def get_text_with_final_url(self, url: str, **kwargs: Any) -> tuple[str, str]:
+        """Load URL and return response text plus the final response URL."""
         timeout = kwargs.pop("timeout", self.timeout)
         try:
             response = self.session.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
-            return response.text
+            return response.text, response.url
         except RequestException:
             self.logger.error("HTTP text request failed: %s", url)
             raise

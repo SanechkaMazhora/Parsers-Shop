@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from time import perf_counter
 from typing import Protocol
+
+from dotenv import load_dotenv
 
 from core.excel_export import export_stores_to_excel
 from core.logging_config import setup_logging
@@ -22,6 +25,16 @@ class ParserInterface(Protocol):
         """Parse stores and return unified records."""
 
 
+def get_default_output_path() -> str:
+    """Resolve default workbook path from environment."""
+    return os.getenv("STORE_PARSER_OUTPUT", "output/stores.xlsx")
+
+
+def get_default_snapshot_path() -> str | None:
+    """Resolve optional snapshot path from environment."""
+    return os.getenv("STORE_PARSER_SNAPSHOT")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build top-level CLI parser."""
     parser = argparse.ArgumentParser(description="Retail stores parser system")
@@ -35,12 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--output",
-        default="output/stores.xlsx",
+        default=get_default_output_path(),
         help="Path to the generated Excel report",
     )
     run_parser.add_argument(
         "--snapshot",
-        default=None,
+        default=get_default_snapshot_path(),
         help="Optional path to the diff snapshot JSON file",
     )
     return parser
@@ -61,20 +74,22 @@ def get_selected_parsers(network: str | None) -> list[tuple[str, ParserInterface
 def run(
     network: str | None = None,
     *,
-    output_path: str = "output/stores.xlsx",
+    output_path: str | None = None,
     snapshot_path: str | None = None,
 ) -> int:
     """Run selected parsers and export combined result."""
     setup_logging()
     logger = logging.getLogger("main")
     started_at = perf_counter()
+    resolved_output_path = output_path or get_default_output_path()
+    resolved_snapshot_path = snapshot_path if snapshot_path is not None else get_default_snapshot_path()
 
     selected_parsers = get_selected_parsers(network)
     logger.info(
         "Run started: parsers=%s output=%s snapshot=%s",
         ",".join(parser_name for parser_name, _ in selected_parsers),
-        output_path,
-        snapshot_path or "<auto>",
+        resolved_output_path,
+        resolved_snapshot_path or "<auto>",
     )
 
     all_stores: list[StoreRecord] = []
@@ -97,8 +112,8 @@ def run(
 
     diff_result = export_stores_to_excel(
         all_stores,
-        output_path=output_path,
-        snapshot_path=snapshot_path,
+        output_path=resolved_output_path,
+        snapshot_path=resolved_snapshot_path,
     )
     duration_seconds = perf_counter() - started_at
     logger.info(
@@ -116,6 +131,7 @@ def run(
 
 def main() -> int:
     """CLI main function."""
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
 

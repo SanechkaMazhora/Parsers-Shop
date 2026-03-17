@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from core.models import STORE_EXPORT_COLUMNS, StoreRecord, build_store_stable_key
+from core.models import STORE_EXPORT_COLUMNS, StoreRecord, build_store_stable_key, normalize_compare_source_url
 
 SNAPSHOT_SCHEMA_VERSION = 1
 CHANGE_SHEET_COLUMNS = [
@@ -40,7 +40,7 @@ TRACKED_CHANGE_FIELDS = [
 
 def _normalize_snapshot_row(raw: Mapping[str, Any]) -> dict[str, Any]:
     row = {column: raw.get(column) for column in STORE_EXPORT_COLUMNS}
-    row["stable_key"] = raw.get("stable_key") or build_store_stable_key(raw)
+    row["stable_key"] = build_store_stable_key(row)
     return row
 
 
@@ -70,19 +70,35 @@ def build_snapshot_rows(stores: Iterable[StoreRecord]) -> list[dict[str, Any]]:
 
 def load_snapshot(snapshot_path: str | Path) -> list[dict[str, Any]]:
     """Load a previously saved snapshot; return empty data on missing/corrupt files."""
+    return load_snapshot_with_meta(snapshot_path).rows
+
+
+@dataclass(slots=True)
+class SnapshotLoadResult:
+    """Snapshot rows plus load status for explainable diff handling."""
+
+    rows: list[dict[str, Any]]
+    status: str
+
+
+def load_snapshot_with_meta(snapshot_path: str | Path) -> SnapshotLoadResult:
+    """Load a previously saved snapshot and describe whether it was available."""
     snapshot_file = Path(snapshot_path)
     if not snapshot_file.exists():
-        return []
+        return SnapshotLoadResult(rows=[], status="missing")
 
     try:
         payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return SnapshotLoadResult(rows=[], status="invalid")
 
     stores = payload.get("stores")
     if not isinstance(stores, list):
-        return []
-    return [_normalize_snapshot_row(item) for item in stores if isinstance(item, dict)]
+        return SnapshotLoadResult(rows=[], status="invalid")
+    return SnapshotLoadResult(
+        rows=[_normalize_snapshot_row(item) for item in stores if isinstance(item, dict)],
+        status="loaded",
+    )
 
 
 def save_snapshot(stores: Iterable[StoreRecord], snapshot_path: str | Path) -> Path:
@@ -137,9 +153,13 @@ class DiffResult:
     added: list[DiffEntry]
     removed: list[DiffEntry]
     changed: list[DiffEntry]
+    is_initial_snapshot: bool = False
+    snapshot_status: str = "loaded"
 
     def to_rows(self) -> list[dict[str, Any]]:
         """Flatten diff entries into Excel-ready rows."""
+        if self.is_initial_snapshot:
+            return []
         detected_at = datetime.now(timezone.utc).isoformat()
         rows = [entry.to_row(detected_at=detected_at) for entry in self.added + self.removed + self.changed]
         rows.sort(
@@ -156,6 +176,9 @@ class DiffResult:
 def compute_diff(
     previous_snapshot: Iterable[Mapping[str, Any]],
     current_snapshot: Iterable[Mapping[str, Any]],
+    *,
+    treat_as_initial: bool = False,
+    snapshot_status: str = "loaded",
 ) -> DiffResult:
     """Compare two snapshots and return added/removed/changed stores."""
     previous_map = {
@@ -166,6 +189,15 @@ def compute_diff(
         row["stable_key"]: row
         for row in (_normalize_snapshot_row(item) for item in current_snapshot)
     }
+
+    if treat_as_initial:
+        return DiffResult(
+            added=[],
+            removed=[],
+            changed=[],
+            is_initial_snapshot=True,
+            snapshot_status=snapshot_status,
+        )
 
     added: list[DiffEntry] = []
     removed: list[DiffEntry] = []
@@ -213,7 +245,12 @@ def compute_diff(
         new_value: dict[str, Any] = {}
 
         for field_name in TRACKED_CHANGE_FIELDS:
-            if previous_row.get(field_name) == current_row.get(field_name):
+            previous_value = previous_row.get(field_name)
+            current_value = current_row.get(field_name)
+            if field_name == "source_url":
+                previous_value = normalize_compare_source_url(previous_value)
+                current_value = normalize_compare_source_url(current_value)
+            if previous_value == current_value:
                 continue
             changed_fields.append(field_name)
             old_value[field_name] = previous_row.get(field_name)
@@ -236,5 +273,9 @@ def compute_diff(
                 new_value=new_value,
             )
         )
-
-    return DiffResult(added=added, removed=removed, changed=changed)
+    return DiffResult(
+        added=added,
+        removed=removed,
+        changed=changed,
+        snapshot_status=snapshot_status,
+    )

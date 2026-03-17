@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from requests import HTTPError, Response
 from bs4 import BeautifulSoup
 
 from core.models import StoreRecord
@@ -146,6 +147,44 @@ def test_extract_city_links_with_hint_filters_malformed_hrefs() -> None:
     assert parser._city_links_filtered_count == 4
 
 
+def test_extract_store_summaries_reads_address_and_work_time_from_city_page() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <div class="shopstore">
+      <a href="/shops_map/ekb/1004">ул Зелёная, 35А</a>
+      <div>8:00-21:00</div>
+    </div>
+    """
+
+    summaries = parser._extract_store_summaries(html, "https://www.monetka.ru/urfo/shops_map/abat")
+
+    assert summaries == {
+        "https://www.monetka.ru/shops_map/ekb/1004": {
+            "address": "ул. Зелёная, 35А",
+            "work_time": "08:00-21:00",
+            "phone": None,
+            "store_format": None,
+        }
+    }
+
+
+def test_build_partial_store_record_uses_city_page_summary() -> None:
+    parser = MonetkaParser(client=None)
+
+    record = parser._build_partial_store_record(
+        "https://www.monetka.ru/shops_map/ekb/1004",
+        context_city="Абатское",
+        context_region="Тюменская область",
+        fallback_summary={"address": "ул Зелёная, 35А", "work_time": "8:00-21:00", "phone": None, "store_format": None},
+    )
+
+    assert record is not None
+    assert record.city == "Абатское"
+    assert record.region == "Тюменская область"
+    assert record.address == "ул. Зелёная, 35А"
+    assert record.work_time == "08:00-21:00"
+
+
 def test_collect_city_hints_includes_seed_city_list_for_active_region() -> None:
     class FakeClient:
         calls: list[str] = []
@@ -220,6 +259,7 @@ def test_parse_deduplicates_stores_by_network_city_address_and_avoids_list_urls(
         *,
         context_city: str | None = None,
         context_region: str | None = None,
+        fallback_summary: dict[str, str | None] | None = None,
     ) -> StoreRecord:
         if url.endswith("/1") or url.endswith("/99"):
             address = "Address 1"
@@ -249,3 +289,47 @@ def test_parse_deduplicates_stores_by_network_city_address_and_avoids_list_urls(
         ("City Two", "Address 2"),
     ]
     assert all("/list" not in call for call in parser.client.calls)  # type: ignore[attr-defined]
+
+
+def test_parse_uses_partial_record_when_store_page_returns_404() -> None:
+    class FakeClient:
+        calls: list[str] = []
+
+        _pages = {
+            "https://www.monetka.ru/shops_map/": """
+                <a href="/region-a/change">Region A</a>
+            """,
+            "https://www.monetka.ru/region-a/change": """
+                <ul class="shop_city_list_ul">
+                  <li><a href="/region-a/shops_map/city-one">City One</a></li>
+                </ul>
+            """,
+            "https://www.monetka.ru/region-a/shops_map/city-one": """
+                <div class="shopstore">
+                  <a href="/shops_map/ekb/1">ул Зелёная, 35А</a>
+                  <div>8:00-21:00</div>
+                </div>
+            """,
+        }
+
+        def get_text(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(url)
+            if url in self._pages:
+                return self._pages[url]
+            if url == "https://www.monetka.ru/shops_map/ekb/1":
+                response = Response()
+                response.status_code = 404
+                response.url = url
+                raise HTTPError("404 Client Error: Not Found", response=response)
+            raise RuntimeError(f"Unexpected URL: {url}")
+
+    parser = MonetkaParser(client=FakeClient())
+
+    stores = parser.parse()
+
+    assert len(stores) == 1
+    assert stores[0].city == "City One"
+    assert stores[0].region == "Region A"
+    assert stores[0].address == "ул. Зелёная, 35А"
+    assert stores[0].work_time == "08:00-21:00"
+    assert stores[0].source_url == "https://www.monetka.ru/shops_map/ekb/1"

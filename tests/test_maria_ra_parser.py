@@ -40,7 +40,7 @@ def test_clean_city_and_address_splits_merged_city_string() -> None:
     city, address = MariaRaParser._clean_city_and_address("рп Кольцово ул.Центральная, 5", None)
 
     assert city == "рп Кольцово"
-    assert address == "ул.Центральная, 5"
+    assert address == "ул. Центральная, 5"
 
 
 def test_clean_city_strips_trailing_parenthesis_noise() -> None:
@@ -55,6 +55,27 @@ def test_clean_city_and_address_extracts_city_from_address_when_city_missing() -
 
     assert city == "Новосибирск"
     assert address == "ул. Советская, 10"
+
+
+def test_clean_city_and_address_does_not_invent_city_from_street_name() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "Змеиногорский тракт, 71в")
+
+    assert city is None
+    assert address == "Змеиногорский тракт, 71в"
+
+
+def test_clean_city_and_address_keeps_full_address_when_only_house_number_remains() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "п. Научный городок, 30")
+
+    assert city == "п. Научный городок"
+    assert address == "п. Научный городок, 30"
+
+
+def test_clean_city_and_address_extracts_locality_when_address_has_street_part() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "п.Казенная Заимка, ул.Кольцевая, 11а")
+
+    assert city == "п. Казенная Заимка"
+    assert address == "ул. Кольцевая, 11а"
 
 
 def test_normalize_store_builds_unique_source_url_from_coordinates() -> None:

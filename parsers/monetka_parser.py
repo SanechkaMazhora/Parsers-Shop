@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import re
 from collections import deque
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from requests import RequestException
 
 from core.http_client import HttpClient
 from core.models import StoreRecord
@@ -57,11 +58,11 @@ class MonetkaParser:
                 "; ".join(self._rejected_city_href_samples[:10]),
             )
 
-        store_context_by_url: dict[str, tuple[str | None, str | None]] = {}
+        store_context_by_url: dict[str, dict[str, str | None]] = {}
         for city_url in city_pages:
             context_city, context_region = city_context_by_url.get(city_url, (None, None))
             try:
-                city_store_links, city_context = self._collect_store_links_for_city(
+                city_store_summaries, city_context = self._collect_store_links_for_city(
                     city_url,
                     city_hint=context_city,
                     region_hint=context_region,
@@ -69,43 +70,91 @@ class MonetkaParser:
             except Exception as exc:
                 self.logger.warning("Monetka: failed collecting stores for city page %s: %s", city_url, exc)
                 continue
-            for store_url in city_store_links:
+            for store_url, summary in city_store_summaries.items():
                 # Keep first discovered context for deterministic assignment.
                 if store_url not in store_context_by_url:
-                    store_context_by_url[store_url] = city_context
+                    store_context_by_url[store_url] = {
+                        "context_city": city_context[0],
+                        "context_region": city_context[1],
+                        "address": summary.get("address"),
+                        "work_time": summary.get("work_time"),
+                        "phone": summary.get("phone"),
+                        "store_format": summary.get("store_format"),
+                    }
 
         self.logger.info("Monetka: discovered %s unique store pages", len(store_context_by_url))
         if store_context_by_url:
             store_examples = sorted(store_context_by_url)[:5]
             self.logger.info("Monetka: store examples: %s", ", ".join(store_examples))
         parsed_store_pages = 0
+        partial_store_pages = 0
+        skipped_store_pages = 0
         debug_stores_left = 20
         for store_url in sorted(store_context_by_url):
-            context_city, context_region = store_context_by_url.get(store_url, (None, None))
+            store_context = store_context_by_url.get(store_url, {})
+            context_city = store_context.get("context_city")
+            context_region = store_context.get("context_region")
+            fallback_summary = {
+                "address": store_context.get("address"),
+                "work_time": store_context.get("work_time"),
+                "phone": store_context.get("phone"),
+                "store_format": store_context.get("store_format"),
+            }
             try:
-                html = self.client.get_text(store_url)
+                html, resolved_store_url = self._get_text_with_final_url(store_url)
+            except Exception as exc:
+                partial_record = None
+                if self._is_request_failure(exc):
+                    partial_record = self._build_partial_store_record(
+                        store_url,
+                        context_city=context_city,
+                        context_region=context_region,
+                        fallback_summary=fallback_summary,
+                    )
+                if partial_record is not None:
+                    stores.append(partial_record)
+                    partial_store_pages += 1
+                    self.logger.warning(
+                        "Monetka: detail page unavailable, saved partial record source_url=%s status_code=%s fields=%s",
+                        store_url,
+                        self._get_http_status_code(exc),
+                        ",".join(self._collect_available_partial_fields(partial_record)),
+                    )
+                else:
+                    skipped_store_pages += 1
+                    self.logger.warning("Monetka: failed store page %s: %s", store_url, exc)
+                continue
+            try:
                 store_record = self._parse_store_page(
                     html,
-                    store_url,
+                    resolved_store_url,
                     context_city=context_city,
                     context_region=context_region,
+                    fallback_summary=fallback_summary,
                 )
-                stores.append(store_record)
-                parsed_store_pages += 1
-                if debug_stores_left > 0:
-                    self.logger.info(
-                        "Monetka: parsed store sample region='%s' city='%s' source_url=%s",
-                        store_record.region,
-                        store_record.city,
-                        store_record.source_url,
-                    )
-                    debug_stores_left -= 1
             except Exception as exc:
-                self.logger.warning("Monetka: failed store page %s: %s", store_url, exc)
+                skipped_store_pages += 1
+                self.logger.warning("Monetka: failed parsing store page %s: %s", store_url, exc)
+                continue
+            stores.append(store_record)
+            parsed_store_pages += 1
+            if debug_stores_left > 0:
+                self.logger.info(
+                    "Monetka: parsed store sample region='%s' city='%s' source_url=%s",
+                    store_record.region,
+                    store_record.city,
+                    store_record.source_url,
+                )
+                debug_stores_left -= 1
         deduped = self._deduplicate_stores(stores)
         if len(deduped) != len(stores):
             self.logger.info("Monetka: deduplicated stores %s -> %s", len(stores), len(deduped))
-        self.logger.info("Monetka: parsed %s store pages", parsed_store_pages)
+        self.logger.info(
+            "Monetka: parsed %s store pages, saved %s partial records, skipped %s store pages",
+            parsed_store_pages,
+            partial_store_pages,
+            skipped_store_pages,
+        )
         return deduped
 
     def _collect_city_pages(self) -> list[str]:
@@ -212,11 +261,11 @@ class MonetkaParser:
         *,
         city_hint: str | None = None,
         region_hint: str | None = None,
-    ) -> tuple[set[str], tuple[str | None, str | None]]:
+    ) -> tuple[dict[str, dict[str, str | None]], tuple[str | None, str | None]]:
         """Collect store links from city page and pagination if present."""
         queue: deque[str] = deque([city_url])
         visited: set[str] = set()
-        stores: set[str] = set()
+        stores: dict[str, dict[str, str | None]] = {}
         max_pages = 20
         resolved_city_hint = self._sanitize_location(city_hint)
         resolved_region_hint = self._sanitize_location(region_hint)
@@ -244,8 +293,9 @@ class MonetkaParser:
                 if not city_context[1] and extracted_region:
                     city_context = (city_context[0], self._sanitize_location(extracted_region))
 
-            for store_link in self._extract_store_links(html, page_url):
-                stores.add(store_link)
+            for store_link, summary in self._extract_store_summaries(html, page_url).items():
+                if store_link not in stores:
+                    stores[store_link] = summary
             for next_page in self._extract_pagination_links(html, page_url):
                 if next_page not in visited:
                     queue.append(next_page)
@@ -271,14 +321,31 @@ class MonetkaParser:
                 yield absolute, hint
 
     def _extract_store_links(self, html: str, base_url: str) -> Iterable[str]:
+        for store_url in self._extract_store_summaries(html, base_url):
+            yield store_url
+
+    def _extract_store_summaries(self, html: str, base_url: str) -> dict[str, dict[str, str | None]]:
         soup = BeautifulSoup(html, "lxml")
-        seen: set[str] = set()
-        for href in self._iter_hrefs(soup):
+        summaries: dict[str, dict[str, str | None]] = {}
+        for anchor in soup.select("a[href]"):
+            href = anchor.get("href")
+            if not href:
+                continue
             absolute = urljoin(base_url, href)
             path = urlparse(absolute).path
-            if self._is_store_path(path) and absolute not in seen:
-                seen.add(absolute)
-                yield absolute
+            if not self._is_store_path(path):
+                continue
+            if absolute in summaries:
+                continue
+            address = self._clean_address(anchor.get_text(" ", strip=True))
+            work_time = self._extract_store_summary_work_time(anchor, address=address)
+            summaries[absolute] = {
+                "address": address,
+                "work_time": work_time,
+                "phone": None,
+                "store_format": None,
+            }
+        return summaries
 
     def _extract_pagination_links(self, html: str, base_url: str) -> Iterable[str]:
         soup = BeautifulSoup(html, "lxml")
@@ -473,15 +540,27 @@ class MonetkaParser:
         *,
         context_city: str | None = None,
         context_region: str | None = None,
+        fallback_summary: dict[str, str | None] | None = None,
     ) -> StoreRecord:
         soup = BeautifulSoup(html, "lxml")
         text = soup.get_text("\n", strip=True)
+        summary = fallback_summary or {}
 
         details = self._extract_details_from_dl(soup)
-        address = details.get("address") or self._extract_label_value(text, ("Адрес", "Почтовый адрес"))
-        work_time = details.get("work_time") or self._extract_label_value(text, ("Режим работы", "Время работы"))
-        store_format = details.get("store_format") or self._extract_label_value(text, ("Формат магазина",))
-        phone = details.get("phone") or self._extract_phone(text)
+        address = self._clean_address(
+            details.get("address")
+            or self._extract_label_value(text, ("Адрес", "Почтовый адрес"))
+            or summary.get("address")
+        )
+        work_time = self._clean_work_time(
+            details.get("work_time")
+            or self._extract_label_value(text, ("Режим работы", "Время работы"))
+            or summary.get("work_time")
+        )
+        store_format = details.get("store_format") or self._extract_label_value(text, ("Формат магазина",)) or summary.get(
+            "store_format"
+        )
+        phone = details.get("phone") or self._extract_phone(text) or summary.get("phone")
         city, region = self._extract_city_region(soup, url, text=text, details=details)
         city = city or details.get("city") or self._extract_strict_label_value(text, ("Город", "Населенный пункт"))
         region = region or details.get("region") or self._extract_strict_label_value(
@@ -513,6 +592,37 @@ class MonetkaParser:
             )
             self._debug_location_logs_left -= 1
 
+        latitude, longitude = self._extract_coordinates(soup)
+        return StoreRecord.build(
+            network=self.NETWORK_NAME,
+            region=region,
+            city=city,
+            address=address,
+            work_time=work_time,
+            lat=latitude,
+            lng=longitude,
+            phone=phone,
+            store_format=store_format,
+            status=None,
+            source_url=url,
+        )
+
+    def _build_partial_store_record(
+        self,
+        url: str,
+        *,
+        context_city: str | None,
+        context_region: str | None,
+        fallback_summary: dict[str, str | None],
+    ) -> StoreRecord | None:
+        city = self._sanitize_location(context_city)
+        region = self._sanitize_location(context_region)
+        address = self._clean_address(fallback_summary.get("address"))
+        work_time = self._clean_work_time(fallback_summary.get("work_time"))
+        phone = fallback_summary.get("phone")
+        store_format = fallback_summary.get("store_format")
+        if not any((city, region, address, work_time, phone, store_format)):
+            return None
         return StoreRecord.build(
             network=self.NETWORK_NAME,
             region=region,
@@ -526,6 +636,30 @@ class MonetkaParser:
             status=None,
             source_url=url,
         )
+
+    @staticmethod
+    def _collect_available_partial_fields(store: StoreRecord) -> list[str]:
+        fields: list[str] = []
+        for field_name in ("region", "city", "address", "work_time", "phone", "store_format"):
+            if getattr(store, field_name):
+                fields.append(field_name)
+        return fields
+
+    @staticmethod
+    def _get_http_status_code(exc: Exception) -> int | None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code if isinstance(status_code, int) else None
+
+    @staticmethod
+    def _is_request_failure(exc: Exception) -> bool:
+        return isinstance(exc, RequestException) or MonetkaParser._get_http_status_code(exc) is not None
+
+    def _get_text_with_final_url(self, url: str) -> tuple[str, str]:
+        if hasattr(self.client, "get_text_with_final_url"):
+            text, final_url = self.client.get_text_with_final_url(url)  # type: ignore[attr-defined]
+            return text, final_url
+        return self.client.get_text(url), url
 
     @staticmethod
     def _iter_hrefs(soup: BeautifulSoup) -> Iterable[str]:
@@ -569,6 +703,108 @@ class MonetkaParser:
     def _extract_phone(text: str) -> str | None:
         match = re.search(r"(\+?\d[\d\-\s()]{7,}\d)", text)
         return match.group(1).strip() if match else None
+
+    @classmethod
+    def _extract_store_summary_work_time(cls, anchor: Any, *, address: str | None) -> str | None:
+        seen_texts: set[str] = set()
+        current = anchor
+        for _ in range(5):
+            current = getattr(current, "parent", None)
+            if current is None:
+                break
+            text = current.get_text("\n", strip=True)
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            for line in text.splitlines():
+                candidate = line.strip()
+                if not candidate:
+                    continue
+                if address and cls._normalize_token(candidate) == cls._normalize_token(address):
+                    continue
+                normalized = cls._find_work_time_in_text(candidate)
+                if normalized:
+                    return normalized
+        return None
+
+    @classmethod
+    def _find_work_time_in_text(cls, text: str) -> str | None:
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if not cleaned:
+            return None
+        lowered = cleaned.lower()
+        if "круглосуточ" in lowered:
+            return "круглосуточно"
+        patterns = (
+            r"\b\d{1,2}(?::|\.)\d{2}\s*[—\-]\s*\d{1,2}(?::|\.)\d{2}\b",
+            r"\b\d{1,2}\s*[—\-]\s*\d{1,2}(?::|\.)\d{2}\b",
+            r"\b\d{1,2}(?::|\.)\d{2}\s*[—\-]\s*\d{1,2}\b",
+            r"\b\d{1,2}\s*[—\-]\s*\d{1,2}\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, cleaned)
+            if not match:
+                continue
+            normalized = cls._clean_work_time(match.group(0))
+            if normalized:
+                return normalized
+        return None
+
+    @classmethod
+    def _clean_work_time(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = re.sub(r"\s+", " ", value).strip(" ,;")
+        if not cleaned:
+            return None
+        cleaned = cleaned.replace("—", "-").replace("–", "-")
+        cleaned = re.sub(r"\s*-\s*", "-", cleaned)
+        if "круглосуточ" in cleaned.lower():
+            return "круглосуточно"
+        match = re.fullmatch(r"(?P<start>\d{1,2}(?::\d{2}|\.\d{2})?)-(?P<end>\d{1,2}(?::\d{2}|\.\d{2})?)", cleaned)
+        if not match:
+            return cleaned
+        start = cls._normalize_time_token(match.group("start"))
+        end = cls._normalize_time_token(match.group("end"))
+        if start and end:
+            return f"{start}-{end}"
+        return cleaned
+
+    @staticmethod
+    def _normalize_time_token(token: str) -> str | None:
+        cleaned = token.strip().replace(".", ":")
+        if re.fullmatch(r"\d{1,2}", cleaned):
+            return f"{int(cleaned):02d}:00"
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})", cleaned)
+        if not match:
+            return None
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+    @classmethod
+    def _clean_address(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = re.sub(r"\s+", " ", value).strip(" ,;")
+        if not cleaned:
+            return None
+        cleaned = re.sub(r"^адрес\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^у\s+ул\.?\s*", "ул. ", cleaned, flags=re.IGNORECASE)
+        if re.match(r"^у\s+", cleaned, flags=re.IGNORECASE):
+            rest = re.sub(r"^у\s+", "", cleaned, flags=re.IGNORECASE).strip()
+            parts = [part.strip() for part in rest.split(",")]
+            if len(parts) >= 3:
+                cleaned = rest
+            elif len(parts) == 2:
+                cleaned = f"ул. {rest}"
+            else:
+                cleaned = rest
+        cleaned = re.sub(r"^ул\s+", "ул. ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^пер\s+", "пер. ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^пр[- ]?кт\s+", "пр-кт ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^просп\s+", "просп. ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+,", ",", cleaned)
+        cleaned = re.sub(r",\s*,+", ", ", cleaned)
+        return cleaned or None
 
     @staticmethod
     def _extract_details_from_dl(soup: BeautifulSoup) -> dict[str, str]:
@@ -777,6 +1013,38 @@ class MonetkaParser:
         city = city_match.group(1).strip() if city_match else None
         region = region_match.group(1).strip() if region_match else None
         return city, region
+
+    @staticmethod
+    def _extract_coordinates(soup: BeautifulSoup) -> tuple[float | None, float | None]:
+        for node in soup.select("[data-lat][data-lng], [data-lat][data-lon], [data-latitude][data-longitude]"):
+            lat = node.get("data-lat") or node.get("data-latitude")
+            lng = node.get("data-lng") or node.get("data-lon") or node.get("data-longitude")
+            lat_value = MonetkaParser._to_float(lat)
+            lng_value = MonetkaParser._to_float(lng)
+            if lat_value is not None and lng_value is not None:
+                return lat_value, lng_value
+
+        joined_scripts = " ".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))
+        if not joined_scripts:
+            return None, None
+
+        pair_patterns = (
+            r'"lat(?:itude)?"\s*:\s*"?([0-9]{1,2}\.\d+)"?.{0,120}?"(?:lng|lon|longitude)"\s*:\s*"?([0-9]{1,3}\.\d+)"?',
+            r'"(?:lng|lon|longitude)"\s*:\s*"?([0-9]{1,3}\.\d+)"?.{0,120}?"lat(?:itude)?"\s*:\s*"?([0-9]{1,2}\.\d+)"?',
+        )
+        for index, pattern in enumerate(pair_patterns):
+            match = re.search(pattern, joined_scripts, flags=re.IGNORECASE)
+            if not match:
+                continue
+            if index == 0:
+                lat_raw, lng_raw = match.group(1), match.group(2)
+            else:
+                lng_raw, lat_raw = match.group(1), match.group(2)
+            lat_value = MonetkaParser._to_float(lat_raw)
+            lng_value = MonetkaParser._to_float(lng_raw)
+            if lat_value is not None and lng_value is not None:
+                return lat_value, lng_value
+        return None, None
 
     @staticmethod
     def _slug_to_name(slug: str | None) -> str | None:

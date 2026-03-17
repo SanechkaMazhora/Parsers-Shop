@@ -287,13 +287,9 @@ class MariaRaParser:
         cleaned = re.sub(r"\s+", " ", name).strip(" ,")
         if not cleaned:
             return None, None
-        split_match = re.match(
-            r"^(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*([^,]+),\s*(.+)$",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if split_match:
-            return split_match.group(1).strip(), split_match.group(2).strip()
+        prefix_part, remainder = MariaRaParser._split_locality_prefix(cleaned)
+        if prefix_part and remainder:
+            return prefix_part, remainder
 
         # Sometimes city and address are merged without comma: "рп Кольцово ул.Центральная, 1".
         merged_match = re.match(
@@ -305,12 +301,18 @@ class MariaRaParser:
         if merged_match:
             return merged_match.group("city").strip(), merged_match.group("address").strip()
 
-        parts = [part.strip() for part in cleaned.split(",", 1)]
-        if len(parts) == 2:
-            city_guess = parts[0]
-            if len(city_guess) <= 40:
-                return city_guess, parts[1]
         return None, cleaned
+
+    @staticmethod
+    def _split_locality_prefix(value: str) -> tuple[str | None, str | None]:
+        match = re.match(
+            r"^(?P<city>(?:г\.?|город|пгт|пос\.?|поселок|п\.|рп|с\.|село|д\.п\.?|деревня|ст-ца|станица)\s*[^,]+),\s*(?P<rest>.+)$",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None, None
+        return match.group("city").strip(), match.group("rest").strip()
 
     @staticmethod
     def _parse_coordinate_string(value: Any) -> list[float] | None:
@@ -542,6 +544,8 @@ class MariaRaParser:
         if not isinstance(value, str):
             return None
         cleaned = re.sub(r"\s+", " ", value).strip(" \t\r\n,;")
+        cleaned = re.sub(r"\.(?=[A-Za-zА-Яа-яЁё])", ". ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
         cleaned = re.sub(r"\)+\s*$", "", cleaned).strip(" ,;")
         return cleaned or None
 
@@ -597,6 +601,7 @@ class MariaRaParser:
         cleaned = MariaRaParser._clean_text(value)
         if not cleaned:
             return None
+        cleaned = re.sub(r"^(?:г\.?|город)\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.rstrip(")")
         cleaned = re.sub(r"\s*\)\s*$", "", cleaned).strip(" ,;")
         if MariaRaParser._looks_like_address(cleaned):
@@ -628,13 +633,18 @@ class MariaRaParser:
     def _clean_city_and_address(city: str | None, address: str | None) -> tuple[str | None, str | None]:
         cleaned_city = MariaRaParser._clean_text(city)
         cleaned_address = MariaRaParser._clean_address(address)
+        original_address = cleaned_address
+        preserve_full_address = False
 
         if not cleaned_city and cleaned_address:
             split_city, split_address = MariaRaParser._split_city_and_address(cleaned_address)
             if split_city:
                 cleaned_city = split_city
-            if split_address:
+            if split_address and MariaRaParser._is_informative_address_fragment(split_address):
                 cleaned_address = split_address
+            else:
+                cleaned_address = original_address
+                preserve_full_address = True
 
         if cleaned_city:
             # Handle merged city+address in one field.
@@ -657,7 +667,10 @@ class MariaRaParser:
                         cleaned_address = right
 
         normalized_city = MariaRaParser._clean_city(cleaned_city)
-        normalized_address = MariaRaParser._clean_address(cleaned_address, city_hint=normalized_city)
+        normalized_address = MariaRaParser._clean_address(
+            cleaned_address,
+            city_hint=None if preserve_full_address else normalized_city,
+        )
         return normalized_city, normalized_address
 
     @staticmethod
@@ -692,3 +705,28 @@ class MariaRaParser:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _is_informative_address_fragment(value: str | None) -> bool:
+        if not value:
+            return False
+        lowered = value.lower()
+        street_markers = (
+            "ул",
+            "улиц",
+            "пр-кт",
+            "просп",
+            "пер",
+            "переул",
+            "квартал",
+            "мкр",
+            "дом",
+            "д.",
+            "б-р",
+            "бул",
+            "шоссе",
+            "тракт",
+            "проезд",
+            "пр-д",
+        )
+        return any(marker in lowered for marker in street_markers)

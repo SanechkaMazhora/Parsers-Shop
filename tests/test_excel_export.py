@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from core.excel_export import CHANGES_SHEET_NAME, DATA_SHEET_NAME, STATS_SHEET_NAME, export_stores_to_excel
 from core.models import STORE_EXPORT_COLUMNS, StoreRecord
@@ -34,19 +35,29 @@ def test_excel_export_creates_file_and_required_sheets() -> None:
     snapshot_path = _snapshot_path_for(output_path)
     try:
         stores = [_make_store("n1", "c1", "a1")]
-        export_stores_to_excel(stores, output_path=str(output_path))
+        diff_result = export_stores_to_excel(stores, output_path=str(output_path))
 
         assert output_path.exists()
         assert snapshot_path.exists()
+        assert diff_result.is_initial_snapshot is True
         with pd.ExcelFile(output_path) as workbook:
             assert DATA_SHEET_NAME in workbook.sheet_names
             assert CHANGES_SHEET_NAME in workbook.sheet_names
             assert STATS_SHEET_NAME in workbook.sheet_names
         data_df = pd.read_excel(output_path, sheet_name=DATA_SHEET_NAME)
         stats_df = pd.read_excel(output_path, sheet_name=STATS_SHEET_NAME)
+        changes_df = pd.read_excel(output_path, sheet_name=CHANGES_SHEET_NAME)
         assert list(data_df.columns) == STORE_EXPORT_COLUMNS
         assert list(stats_df.columns) == ["network", "stores_count"]
         assert stats_df.to_dict(orient="records") == [{"network": "n1", "stores_count": 1}]
+        assert changes_df.empty
+
+        workbook = load_workbook(output_path)
+        for sheet_name in (DATA_SHEET_NAME, CHANGES_SHEET_NAME, STATS_SHEET_NAME):
+            worksheet = workbook[sheet_name]
+            assert worksheet.freeze_panes == "A2"
+            assert worksheet.auto_filter.ref is not None
+            assert worksheet.column_dimensions["A"].width >= 12
     finally:
         if output_path.exists():
             output_path.unlink()

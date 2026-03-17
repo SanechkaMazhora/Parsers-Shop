@@ -55,3 +55,20 @@ def test_store_record_build_normalizes_address_and_legacy_aliases() -> None:
     assert record.longitude == 82.92
     assert record.lat == 55.03
     assert record.lng == 82.92
+
+
+def test_store_record_stable_key_is_same_for_monetka_store_alias_urls() -> None:
+    first = StoreRecord.build(
+        network="Монетка",
+        city="Кушва",
+        address="ул. Ленина, 1",
+        source_url="https://www.monetka.ru/shops_map/ekb/1004",
+    )
+    second = StoreRecord.build(
+        network="Монетка",
+        city="Кушва",
+        address="ул. Ленина, 1",
+        source_url="https://www.monetka.ru/shops_map/votkinsk/1004",
+    )
+
+    assert first.stable_key() == second.stable_key()

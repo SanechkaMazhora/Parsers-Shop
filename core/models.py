@@ -77,11 +77,28 @@ def normalize_source_url(value: Any) -> str:
     return cleaned or ""
 
 
-def is_store_specific_source_url(value: Any) -> bool:
-    """Detect whether the source URL already identifies a single store."""
+def normalize_compare_source_url(value: Any) -> str:
+    """Normalize source URLs for diff/stable-key comparison."""
     source_url = normalize_source_url(value)
     if not source_url:
+        return ""
+    monetka_match = re.search(
+        r"https?://(?:www\.)?monetka\.ru/(?:[^/]+/)?shops_map/[^/]+/(\d+)/?$",
+        source_url,
+        flags=re.IGNORECASE,
+    )
+    if monetka_match:
+        return f"monetka-store:{monetka_match.group(1)}"
+    return source_url
+
+
+def is_store_specific_source_url(value: Any) -> bool:
+    """Detect whether the source URL already identifies a single store."""
+    source_url = normalize_compare_source_url(value)
+    if not source_url:
         return False
+    if source_url.startswith("monetka-store:"):
+        return True
     if "#" in source_url:
         return True
     if re.search(r"/\d+/?$", source_url):
@@ -98,7 +115,7 @@ def build_store_stable_key(data: Mapping[str, Any]) -> str:
     city = normalize_optional_text(data.get("city"))
 
     parts = [f"network:{normalize_text_token(data.get('network'))}"]
-    source_url = normalize_source_url(data.get("source_url"))
+    source_url = normalize_compare_source_url(data.get("source_url"))
     if source_url:
         parts.append(f"url:{source_url}")
 
