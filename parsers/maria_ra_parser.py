@@ -207,6 +207,22 @@ class MariaRaParser:
         return items
 
     @staticmethod
+    def _get_first_value(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+        for key in keys:
+            if key in payload:
+                return payload[key]
+        lowered_payload = {key.lower(): value for key, value in payload.items() if isinstance(key, str)}
+        for key in keys:
+            if key.lower() in lowered_payload:
+                return lowered_payload[key.lower()]
+        return None
+
+    @staticmethod
+    def _get_first_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+        value = MariaRaParser._get_first_value(payload, keys)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @staticmethod
     def _decode_js_string_literal(token: str) -> str | None:
         try:
             with warnings.catch_warnings():
@@ -219,19 +235,22 @@ class MariaRaParser:
     def _normalize_raw_js_item(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         # Common Maria-Ra map payload style: NAME + COORDINATE + STARTED/END_WORK
         if any(key in raw for key in ("NAME", "COORDINATE", "STARTED_WORK", "END_WORK")):
-            name = raw.get("NAME") if isinstance(raw.get("NAME"), str) else None
+            name = self._get_first_string(raw, ("NAME", "name"))
             city, address = self._split_city_and_address(name)
-            coord_pair = self._parse_coordinate_string(raw.get("COORDINATE"))
-            work_time = self._build_work_time_from_parts(raw.get("STARTED_WORK"), raw.get("END_WORK"))
+            coord_pair = self._parse_coordinate_string(self._get_first_value(raw, ("COORDINATE", "coordinate")))
+            work_time = self._build_work_time_from_parts(raw.get("STARTED_WORK"), raw.get("END_WORK")) or self._get_first_string(
+                raw,
+                ("WORK_TIME", "SCHEDULE", "WORKTIME"),
+            )
             return {
-                "address": address,
-                "city": city,
-                "region": raw.get("SECTION") if isinstance(raw.get("SECTION"), str) else None,
+                "address": address or self._get_first_string(raw, ("ADDRESS", "ADDR", "FULL_ADDRESS", "FULLADDRESS")),
+                "city": city or self._get_first_string(raw, ("CITY", "TOWN", "LOCALITY", "SETTLEMENT")),
+                "region": self._get_first_string(raw, ("REGION", "REGION_NAME", "REGIONNAME", "SECTION")),
                 "work_time": work_time,
                 "coords": coord_pair,
-                "phone": None,
-                "status": None,
-                "format": None,
+                "phone": self._get_first_string(raw, ("PHONE", "TEL", "TELEPHONE")),
+                "status": self._get_first_string(raw, ("STATUS", "STATUS_NAME", "STATUSNAME")),
+                "format": self._get_first_string(raw, ("FORMAT", "STORE_FORMAT", "STOREFORMAT")),
             }
 
         # GeoJSON feature format
@@ -246,28 +265,37 @@ class MariaRaParser:
             )
             popup_data = self._parse_popup_content(popup_html if isinstance(popup_html, str) else "")
             return {
-                "address": properties.get("address") or popup_data.get("address"),
-                "city": properties.get("city") or popup_data.get("city"),
-                "region": properties.get("region") or popup_data.get("region"),
-                "work_time": properties.get("work_time") or properties.get("schedule") or popup_data.get("work_time"),
-                "phone": properties.get("phone") or popup_data.get("phone"),
+                "address": self._get_first_string(properties, ("address", "addr", "full_address", "fullAddress"))
+                or popup_data.get("address"),
+                "city": self._get_first_string(properties, ("city", "town", "locality", "settlement"))
+                or popup_data.get("city"),
+                "region": self._get_first_string(properties, ("region", "region_name", "regionName"))
+                or popup_data.get("region"),
+                "work_time": self._get_first_string(properties, ("work_time", "schedule", "workTime"))
+                or popup_data.get("work_time"),
+                "phone": self._get_first_string(properties, ("phone", "tel", "telephone")) or popup_data.get("phone"),
                 "coords": coords,
+                "status": self._get_first_string(properties, ("status", "status_name", "statusName"))
+                or popup_data.get("status"),
+                "format": self._get_first_string(properties, ("format", "store_format", "storeFormat"))
+                or popup_data.get("format"),
             }
 
         # Direct flat objects
-        popup_html = raw.get("popup") or raw.get("balloonContent") or raw.get("balloonContentBody")
+        popup_html = self._get_first_string(raw, ("popup", "balloonContent", "balloonContentBody"))
         popup_data = self._parse_popup_content(popup_html if isinstance(popup_html, str) else "")
         candidate = {
-            "address": raw.get("address") or raw.get("addr") or popup_data.get("address"),
-            "city": raw.get("city") or raw.get("town") or raw.get("locality") or popup_data.get("city"),
-            "region": raw.get("region") or popup_data.get("region"),
-            "work_time": raw.get("work_time") or raw.get("schedule") or raw.get("workTime") or popup_data.get("work_time"),
-            "phone": raw.get("phone") or popup_data.get("phone"),
-            "lat": raw.get("lat"),
-            "lng": raw.get("lng"),
-            "coords": raw.get("coords") or raw.get("coordinates"),
-            "status": raw.get("status"),
-            "format": raw.get("format"),
+            "address": self._get_first_string(raw, ("address", "addr", "full_address", "fullAddress"))
+            or popup_data.get("address"),
+            "city": self._get_first_string(raw, ("city", "town", "locality", "settlement")) or popup_data.get("city"),
+            "region": self._get_first_string(raw, ("region", "region_name", "regionName")) or popup_data.get("region"),
+            "work_time": self._get_first_string(raw, ("work_time", "schedule", "workTime")) or popup_data.get("work_time"),
+            "phone": self._get_first_string(raw, ("phone", "tel", "telephone")) or popup_data.get("phone"),
+            "lat": self._get_first_value(raw, ("lat", "latitude")),
+            "lng": self._get_first_value(raw, ("lng", "lon", "longitude")),
+            "coords": self._get_first_value(raw, ("coords", "coordinates")),
+            "status": self._get_first_string(raw, ("status", "status_name", "statusName")) or popup_data.get("status"),
+            "format": self._get_first_string(raw, ("format", "store_format", "storeFormat")) or popup_data.get("format"),
         }
         # Keep only meaningful store candidates.
         if (
@@ -292,27 +320,65 @@ class MariaRaParser:
             return prefix_part, remainder
 
         # Sometimes city and address are merged without comma: "рп Кольцово ул.Центральная, 1".
-        merged_match = re.match(
-            r"^(?P<city>(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*.+?)\s+"
-            r"(?P<address>(?:ул\.|улица|пр-кт|просп|пер\.|переулок|мкр\.?|квартал|б-р|бул\.|д\.|дом).+)$",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if merged_match:
-            return merged_match.group("city").strip(), merged_match.group("address").strip()
+        tokens = cleaned.split()
+        for split_index in range(2, len(tokens)):
+            city_candidate = " ".join(tokens[:split_index]).strip()
+            address_candidate = " ".join(tokens[split_index:]).strip()
+            if not MariaRaParser._looks_like_locality_name(city_candidate):
+                continue
+            if MariaRaParser._is_informative_address_fragment(address_candidate):
+                return city_candidate, address_candidate
 
         return None, cleaned
 
     @staticmethod
-    def _split_locality_prefix(value: str) -> tuple[str | None, str | None]:
-        match = re.match(
-            r"^(?P<city>(?:г\.?|город|пгт|пос\.?|поселок|п\.|рп|с\.|село|д\.п\.?|деревня|ст-ца|станица)\s*[^,]+),\s*(?P<rest>.+)$",
-            value,
-            flags=re.IGNORECASE,
+    def _looks_like_locality_name(value: str | None) -> bool:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return False
+        return bool(
+            re.match(
+                r"^(?:г\.?|город|пгт|пос\.?|поселок|п\.|рп|р\.\s*п\.?|с\.|село|д\.|д\.п\.?|деревня|ст\.?|ст-ца|станица)\s*\S",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
         )
-        if not match:
+
+    @staticmethod
+    def _looks_like_explicit_region_name(value: str | None) -> bool:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return False
+        lowered = cleaned.lower()
+        if lowered.startswith(("респ. ", "республика ")):
+            return True
+        return any(marker in lowered for marker in ("область", "обл.", "край", "автономный округ", " ао"))
+
+    @staticmethod
+    def _split_locality_prefix(value: str) -> tuple[str | None, str | None]:
+        parts = re.split(r"\s*[,;]\s*", value, maxsplit=1)
+        if len(parts) != 2:
             return None, None
-        return match.group("city").strip(), match.group("rest").strip()
+        city_candidate, remainder = parts[0].strip(), parts[1].strip()
+        if not MariaRaParser._looks_like_locality_name(city_candidate):
+            return None, None
+        if MariaRaParser._is_informative_address_fragment(city_candidate):
+            return None, None
+        return city_candidate, remainder
+
+    @staticmethod
+    def _split_region_prefix(value: str | None) -> tuple[str | None, str | None]:
+        cleaned = MariaRaParser._clean_text(value)
+        if not cleaned:
+            return None, None
+        cleaned = re.sub(r"^(?:адрес(?: магазина)?)\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        parts = re.split(r"\s*[,;]\s*", cleaned, maxsplit=1)
+        if len(parts) != 2:
+            return None, None
+        region_candidate, remainder = parts[0].strip(), parts[1].strip()
+        if not MariaRaParser._looks_like_explicit_region_name(region_candidate):
+            return None, None
+        return region_candidate, remainder
 
     @staticmethod
     def _parse_coordinate_string(value: Any) -> list[float] | None:
@@ -347,10 +413,13 @@ class MariaRaParser:
             return match.group(1).strip() if match else None
 
         result: dict[str, str] = {}
-        address = extract(r"(?:Адрес|Магазин)\s*[:\-]?\s*(.+)")
+        address = extract(r"(?:Адрес(?: магазина)?|Магазин)\s*[:\-]?\s*(.+)")
         work_time = extract(r"(?:Режим работы|Время работы)\s*[:\-]?\s*(.+)")
         phone = extract(r"(?:Телефон|Тел\.)\s*[:\-]?\s*(.+)")
-        city = extract(r"(?:Город|Населенный пункт)\s*[:\-]?\s*(.+)")
+        city = extract(r"(?:Город|Населенный пункт|Населённый пункт)\s*[:\-]?\s*(.+)")
+        region = extract(r"(?:Регион|Область|Край|Республика)\s*[:\-]?\s*(.+)")
+        store_format = extract(r"(?:Формат(?: магазина)?)\s*[:\-]?\s*(.+)")
+        status = extract(r"(?:Статус)\s*[:\-]?\s*(.+)")
         if address:
             result["address"] = address
         if work_time:
@@ -359,6 +428,12 @@ class MariaRaParser:
             result["phone"] = phone
         if city:
             result["city"] = city
+        if region:
+            result["region"] = region
+        if store_format:
+            result["format"] = store_format
+        if status:
+            result["status"] = status
         return result
 
     @staticmethod
@@ -509,8 +584,9 @@ class MariaRaParser:
         city_raw = store.get("city") if isinstance(store.get("city"), str) else None
         region_raw = store.get("region") if isinstance(store.get("region"), str) else None
         address_raw = store.get("address") if isinstance(store.get("address"), str) else None
-        city, address = self._clean_city_and_address(city_raw, address_raw)
-        region = self._clean_region(region_raw)
+        region_from_address, address_without_region = self._split_region_prefix(address_raw)
+        city, address = self._clean_city_and_address(city_raw, address_without_region or address_raw)
+        region = self._clean_region(region_raw) or self._clean_region(region_from_address)
         work_time = store.get("work_time") if isinstance(store.get("work_time"), str) else None
         lat, lng = self._extract_coords(store)
         source_url = self._build_source_url(address=address, latitude=lat, longitude=lng)
@@ -519,11 +595,9 @@ class MariaRaParser:
         if not isinstance(phone, str):
             phone = None
         store_format = store.get("format")
-        if not isinstance(store_format, str):
-            store_format = None
+        store_format = self._clean_text(store_format) if isinstance(store_format, str) else None
         status = store.get("status")
-        if not isinstance(status, str):
-            status = None
+        status = self._clean_text(status) if isinstance(status, str) else None
 
         return StoreRecord.build(
             network=self.NETWORK_NAME,
@@ -554,22 +628,30 @@ class MariaRaParser:
         if not value:
             return False
         lowered = value.lower()
-        markers = (
-            "ул",
-            "улиц",
-            "пр-кт",
-            "просп",
-            "пер",
-            "переул",
-            "квартал",
-            "мкр",
-            "дом",
-            "д.",
-            "б-р",
-            "бул",
-            "шоссе",
+        address_patterns = (
+            r"(?:^|[\s,])ул\.?(?:\s|$|[a-zа-яё])",
+            r"\bулиц",
+            r"(?:^|[\s,])пр-кт(?:\s|$|[a-zа-яё])",
+            r"(?:^|[\s,])пр-т(?:\s|$|[a-zа-яё])",
+            r"\bпросп(?:ект)?\b",
+            r"(?:^|[\s,])пер\.?(?:\s|$|[a-zа-яё])",
+            r"\bпереул",
+            r"\bквартал\b",
+            r"(?:^|[\s,])кв-л(?:\s|$|[a-zа-яё])",
+            r"(?:^|[\s,])мкр\.?(?:\s|$|[a-zа-яё])",
+            r"\bдом\b",
+            r"(?:^|[\s,])д\.\s*\d",
+            r"(?:^|[\s,])б-р(?:\s|$|[a-zа-яё])",
+            r"(?:^|[\s,])бул\.?(?:\s|$|[a-zа-яё])",
+            r"\bшоссе\b",
+            r"\bтракт\b",
+            r"\bпроезд\b",
+            r"\bпр-д\b",
+            r"\bнабереж",
+            r"\bплощад",
+            r"\bаллея\b",
         )
-        return bool(re.search(r"\d", lowered) or any(marker in lowered for marker in markers))
+        return bool(re.search(r"\d", lowered) or any(re.search(pattern, lowered) for pattern in address_patterns))
 
     @staticmethod
     def _clean_region(value: str | None) -> str | None:
@@ -613,12 +695,31 @@ class MariaRaParser:
         cleaned = MariaRaParser._clean_text(value)
         if not cleaned:
             return None
+        cleaned = re.sub(r"^(?:адрес(?: магазина)?)\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*;\s*", ", ", cleaned)
         cleaned = re.sub(r"\s+,", ",", cleaned)
         cleaned = re.sub(r",\s*,+", ", ", cleaned)
+        cleaned = re.sub(r",(?=[^\s])", ", ", cleaned)
         if city_hint and "," in cleaned:
             left, right = [part.strip() for part in cleaned.split(",", 1)]
-            if MariaRaParser._normalize_text_token(left) == MariaRaParser._normalize_text_token(city_hint) and right:
+            normalized_left = MariaRaParser._clean_city(left) or left
+            if MariaRaParser._normalize_text_token(normalized_left) == MariaRaParser._normalize_text_token(city_hint) and right:
                 cleaned = right
+        replacements = (
+            (r"^ул\s+", "ул. "),
+            (r"^пер\s+", "пер. "),
+            (r"^пр[- ]?кт\s+", "пр-кт "),
+            (r"^пр-т\s*", "пр-т "),
+            (r"^просп(?:ект)?\s+", "просп. "),
+            (r"^б[- ]?р\s+", "б-р "),
+            (r"^бул\s+", "бул. "),
+            (r"^мкр\s+", "мкр. "),
+            (r"^кв[- ]?л\s+", "кв-л "),
+            (r"^д\s+", "д. "),
+        )
+        for pattern, replacement in replacements:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;")
         if not re.search(r"[А-Яа-яЁё0-9]", cleaned):
             return None
         return cleaned
@@ -647,17 +748,11 @@ class MariaRaParser:
                 preserve_full_address = True
 
         if cleaned_city:
-            # Handle merged city+address in one field.
-            merged = re.match(
-                r"^(?P<city>(?:г\.?|город|пгт|пос\.?|п\.|рп|с\.|д\.п\.?)\s*.+?)\s+"
-                r"(?P<address>(?:ул\.|улица|пр-кт|просп|пер\.|переулок|мкр\.?|квартал|б-р|бул\.|д\.|дом).+)$",
-                cleaned_city,
-                flags=re.IGNORECASE,
-            )
-            if merged:
-                cleaned_city = merged.group("city").strip()
+            split_city, split_address = MariaRaParser._split_city_and_address(cleaned_city)
+            if split_city and split_address and split_city != cleaned_city:
+                cleaned_city = split_city
                 if not cleaned_address:
-                    cleaned_address = merged.group("address").strip()
+                    cleaned_address = split_address
 
             if "," in cleaned_city:
                 left, right = [part.strip() for part in cleaned_city.split(",", 1)]
@@ -702,6 +797,8 @@ class MariaRaParser:
         if value is None:
             return None
         try:
+            if isinstance(value, str):
+                value = value.replace(",", ".").strip()
             return float(value)
         except (TypeError, ValueError):
             return None
@@ -710,23 +807,4 @@ class MariaRaParser:
     def _is_informative_address_fragment(value: str | None) -> bool:
         if not value:
             return False
-        lowered = value.lower()
-        street_markers = (
-            "ул",
-            "улиц",
-            "пр-кт",
-            "просп",
-            "пер",
-            "переул",
-            "квартал",
-            "мкр",
-            "дом",
-            "д.",
-            "б-р",
-            "бул",
-            "шоссе",
-            "тракт",
-            "проезд",
-            "пр-д",
-        )
-        return any(marker in lowered for marker in street_markers)
+        return MariaRaParser._looks_like_address(value) and not bool(re.fullmatch(r"\d+[а-яa-z]?", value.strip(), flags=re.IGNORECASE))

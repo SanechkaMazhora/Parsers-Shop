@@ -8,7 +8,13 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from core.models import STORE_EXPORT_COLUMNS, StoreRecord, build_store_stable_key, normalize_compare_source_url
+from core.models import (
+    STORE_OUTPUT_COLUMNS,
+    StoreRecord,
+    build_store_stable_key,
+    normalize_compare_source_url,
+    normalize_store_output_row,
+)
 
 SNAPSHOT_SCHEMA_VERSION = 1
 CHANGE_SHEET_COLUMNS = [
@@ -36,12 +42,48 @@ TRACKED_CHANGE_FIELDS = [
     "status",
     "source_url",
 ]
+CHANGE_TYPE_SORT_ORDER = {
+    "added": 0,
+    "removed": 1,
+    "changed": 2,
+}
+SNAPSHOT_SORT_FIELDS = [
+    "network",
+    "region",
+    "city",
+    "address",
+    "work_time",
+    "latitude",
+    "longitude",
+    "phone",
+    "store_format",
+    "status",
+    "source_url",
+]
 
 
 def _normalize_snapshot_row(raw: Mapping[str, Any]) -> dict[str, Any]:
-    row = {column: raw.get(column) for column in STORE_EXPORT_COLUMNS}
+    row = normalize_store_output_row(raw)
     row["stable_key"] = build_store_stable_key(row)
     return row
+
+
+def _snapshot_row_sort_key(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(str(row.get(field_name) or "") for field_name in [*SNAPSHOT_SORT_FIELDS, "stable_key"])
+
+
+def _snapshot_row_completeness(row: Mapping[str, Any]) -> int:
+    return sum(1 for field_name in SNAPSHOT_SORT_FIELDS if row.get(field_name) not in (None, ""))
+
+
+def _build_snapshot_map(snapshot: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Build a deterministic stable-key map, preferring richer rows on collisions."""
+    normalized_rows = [_normalize_snapshot_row(item) for item in snapshot]
+    normalized_rows.sort(key=lambda row: (_snapshot_row_completeness(row), _snapshot_row_sort_key(row)))
+    snapshot_map: dict[str, dict[str, Any]] = {}
+    for row in normalized_rows:
+        snapshot_map[row["stable_key"]] = row
+    return snapshot_map
 
 
 def _serialize_payload(data: Mapping[str, Any] | None) -> str | None:
@@ -56,15 +98,7 @@ def _serialize_payload(data: Mapping[str, Any] | None) -> str | None:
 def build_snapshot_rows(stores: Iterable[StoreRecord]) -> list[dict[str, Any]]:
     """Convert records to deterministic snapshot rows."""
     rows = [store.to_snapshot_dict() for store in stores]
-    rows.sort(
-        key=lambda row: (
-            str(row.get("network") or ""),
-            str(row.get("city") or ""),
-            str(row.get("address") or ""),
-            str(row.get("source_url") or ""),
-            str(row.get("stable_key") or ""),
-        )
-    )
+    rows.sort(key=_snapshot_row_sort_key)
     return rows
 
 
@@ -155,19 +189,23 @@ class DiffResult:
     changed: list[DiffEntry]
     is_initial_snapshot: bool = False
     snapshot_status: str = "loaded"
+    detected_at: str | None = None
 
     def to_rows(self) -> list[dict[str, Any]]:
         """Flatten diff entries into Excel-ready rows."""
         if self.is_initial_snapshot:
             return []
-        detected_at = datetime.now(timezone.utc).isoformat()
+        detected_at = self.detected_at or datetime.now(timezone.utc).isoformat()
+        if self.detected_at is None:
+            self.detected_at = detected_at
         rows = [entry.to_row(detected_at=detected_at) for entry in self.added + self.removed + self.changed]
         rows.sort(
             key=lambda row: (
-                str(row.get("change_type") or ""),
+                CHANGE_TYPE_SORT_ORDER.get(str(row.get("change_type") or ""), 99),
                 str(row.get("network") or ""),
                 str(row.get("city") or ""),
                 str(row.get("address") or ""),
+                str(row.get("stable_key") or ""),
             )
         )
         return rows
@@ -181,14 +219,9 @@ def compute_diff(
     snapshot_status: str = "loaded",
 ) -> DiffResult:
     """Compare two snapshots and return added/removed/changed stores."""
-    previous_map = {
-        row["stable_key"]: row
-        for row in (_normalize_snapshot_row(item) for item in previous_snapshot)
-    }
-    current_map = {
-        row["stable_key"]: row
-        for row in (_normalize_snapshot_row(item) for item in current_snapshot)
-    }
+    previous_map = _build_snapshot_map(previous_snapshot)
+    current_map = _build_snapshot_map(current_snapshot)
+    detected_at = datetime.now(timezone.utc).isoformat()
 
     if treat_as_initial:
         return DiffResult(
@@ -197,6 +230,7 @@ def compute_diff(
             changed=[],
             is_initial_snapshot=True,
             snapshot_status=snapshot_status,
+            detected_at=detected_at,
         )
 
     added: list[DiffEntry] = []
@@ -216,7 +250,7 @@ def compute_diff(
                 source_url=current_row.get("source_url"),
                 changed_fields=[],
                 old_value=None,
-                new_value={column: current_row.get(column) for column in STORE_EXPORT_COLUMNS},
+                new_value={column: current_row.get(column) for column in STORE_OUTPUT_COLUMNS},
             )
         )
 
@@ -232,7 +266,7 @@ def compute_diff(
                 address=previous_row.get("address"),
                 source_url=previous_row.get("source_url"),
                 changed_fields=[],
-                old_value={column: previous_row.get(column) for column in STORE_EXPORT_COLUMNS},
+                old_value={column: previous_row.get(column) for column in STORE_OUTPUT_COLUMNS},
                 new_value=None,
             )
         )
@@ -278,4 +312,5 @@ def compute_diff(
         removed=removed,
         changed=changed,
         snapshot_status=snapshot_status,
+        detected_at=detected_at,
     )

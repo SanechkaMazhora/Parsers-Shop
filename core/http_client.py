@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import requests
@@ -11,12 +10,15 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 from urllib3.util.retry import Retry
 
+from core.config import get_default_http_retries, get_default_http_timeout
+
 
 class HttpClient:
     """Small wrapper around requests.Session with retry support."""
 
-    def __init__(self, timeout: int | None = None) -> None:
-        self.timeout = timeout if timeout is not None else self._load_timeout_from_env()
+    def __init__(self, timeout: int | None = None, retries: int | None = None) -> None:
+        self.timeout = timeout if timeout is not None else get_default_http_timeout()
+        resolved_retries = retries if retries is not None else get_default_http_retries()
         self.logger = logging.getLogger(__name__)
         self.session = requests.Session()
         self.session.headers.update(
@@ -29,9 +31,9 @@ class HttpClient:
             }
         )
         retry = Retry(
-            total=3,
-            connect=3,
-            read=3,
+            total=resolved_retries,
+            connect=resolved_retries,
+            read=resolved_retries,
             backoff_factor=0.5,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=("GET", "HEAD"),
@@ -39,18 +41,6 @@ class HttpClient:
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-
-    @staticmethod
-    def _load_timeout_from_env() -> int:
-        raw_value = os.getenv("STORE_PARSER_TIMEOUT")
-        if raw_value:
-            try:
-                parsed = int(raw_value)
-                if parsed > 0:
-                    return parsed
-            except ValueError:
-                pass
-        return 20
 
     def get_text(self, url: str, **kwargs: Any) -> str:
         """Load URL and return response text."""

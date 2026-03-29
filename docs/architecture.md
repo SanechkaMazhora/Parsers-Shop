@@ -22,21 +22,26 @@
 
 ### Data Model
 
-Все записи магазинов представлены одной моделью.
+Все записи магазинов представлены одной канонической моделью `StoreRecord`.
 
-Пример:
+Канонические поля output schema:
 
-Store(
-    network,
-    region,
-    city,
-    address,
-    work_time,
-    latitude,
-    longitude,
-    source_url,
-    collected_at
-)
+- `network`
+- `region`
+- `city`
+- `address`
+- `work_time`
+- `latitude`
+- `longitude`
+- `phone`
+- `store_format`
+- `status`
+- `source_url`
+- `collected_at`
+
+Эта же схема используется в Excel sheet `Актуальные данные`, в snapshot JSON и в полных payload для `added` / `removed` на листе `Изменения`.
+
+Legacy-алиасы `lat`, `lng`, `parsed_at` допускаются только как совместимый вход для старых snapshot и тестового кода, но не считаются каноническим output.
 
 ---
 
@@ -55,6 +60,8 @@ Store(
 - baseline хранится в отдельном snapshot JSON
 - первый запуск только инициализирует baseline и не заполняет лист изменений шумом из `added`
 - stable key строится детерминированно и используется для воспроизводимого diff между полными срезами
+- повторный запуск на тех же данных по тому же snapshot должен давать пустой лист `Изменения`
+- `changed` определяется только по отслеживаемым полям записи, а не по `collected_at`
 
 ---
 
@@ -89,3 +96,6 @@ run --network
 - путь к snapshot
 - log level / log file
 - HTTP timeout
+- HTTP retries
+
+CLI-флаги `--output` и `--snapshot` переопределяют значения из `.env`.

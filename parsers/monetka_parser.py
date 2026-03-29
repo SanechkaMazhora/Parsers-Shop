@@ -68,7 +68,7 @@ class MonetkaParser:
                     region_hint=context_region,
                 )
             except Exception as exc:
-                self.logger.warning("Monetka: failed collecting stores for city page %s: %s", city_url, exc)
+                self._log_request_issue(scope="collect stores for city page", url=city_url, exc=exc)
                 continue
             for store_url, summary in city_store_summaries.items():
                 # Keep first discovered context for deterministic assignment.
@@ -133,8 +133,24 @@ class MonetkaParser:
                     fallback_summary=fallback_summary,
                 )
             except Exception as exc:
-                skipped_store_pages += 1
-                self.logger.warning("Monetka: failed parsing store page %s: %s", store_url, exc)
+                partial_record = self._build_partial_store_record(
+                    store_url,
+                    context_city=context_city,
+                    context_region=context_region,
+                    fallback_summary=fallback_summary,
+                )
+                if partial_record is not None:
+                    stores.append(partial_record)
+                    partial_store_pages += 1
+                    self.logger.warning(
+                        "Monetka: failed parsing store page %s, saved partial record fields=%s error=%s",
+                        store_url,
+                        ",".join(self._collect_available_partial_fields(partial_record)),
+                        exc,
+                    )
+                else:
+                    skipped_store_pages += 1
+                    self.logger.warning("Monetka: failed parsing store page %s: %s", store_url, exc)
                 continue
             stores.append(store_record)
             parsed_store_pages += 1
@@ -172,7 +188,7 @@ class MonetkaParser:
             try:
                 html = self.client.get_text(seed_url)
             except Exception as exc:
-                self.logger.info("Monetka: seed city list unavailable %s: %s", seed_url, exc)
+                self._log_request_issue(scope="seed city list", url=seed_url, exc=exc, level=logging.INFO)
                 continue
             seed_region_name = self._extract_active_region_name(html)
             seed_city_count = 0
@@ -208,7 +224,7 @@ class MonetkaParser:
             try:
                 html = self.client.get_text(url)
             except Exception as exc:
-                self.logger.info("Monetka: seed unavailable %s: %s", url, exc)
+                self._log_request_issue(scope="seed page", url=url, exc=exc, level=logging.INFO)
                 continue
 
             for region_link, region_name in self._extract_region_links_with_name(html, url):
@@ -236,7 +252,7 @@ class MonetkaParser:
         try:
             html = self.client.get_text(region_url, headers=request_headers)
         except Exception as exc:
-            self.logger.info("Monetka: region page unavailable %s: %s", region_url, exc)
+            self._log_request_issue(scope="region page", url=region_url, exc=exc, level=logging.INFO)
             return result
 
         resolved_region_name = self._sanitize_location(region_name) or self._extract_region_name_from_change_url(region_url)
@@ -279,7 +295,7 @@ class MonetkaParser:
             try:
                 html = self.client.get_text(page_url)
             except Exception as exc:
-                self.logger.warning("Monetka: failed city/pagination page %s: %s", page_url, exc)
+                self._log_request_issue(scope="city/pagination page", url=page_url, exc=exc)
                 continue
 
             if page_url == city_url:
@@ -560,6 +576,7 @@ class MonetkaParser:
         store_format = details.get("store_format") or self._extract_label_value(text, ("Формат магазина",)) or summary.get(
             "store_format"
         )
+        status = details.get("status") or self._extract_label_value(text, ("Статус",))
         phone = details.get("phone") or self._extract_phone(text) or summary.get("phone")
         city, region = self._extract_city_region(soup, url, text=text, details=details)
         city = city or details.get("city") or self._extract_strict_label_value(text, ("Город", "Населенный пункт"))
@@ -603,7 +620,7 @@ class MonetkaParser:
             lng=longitude,
             phone=phone,
             store_format=store_format,
-            status=None,
+            status=status,
             source_url=url,
         )
 
@@ -654,6 +671,27 @@ class MonetkaParser:
     @staticmethod
     def _is_request_failure(exc: Exception) -> bool:
         return isinstance(exc, RequestException) or MonetkaParser._get_http_status_code(exc) is not None
+
+    def _log_request_issue(
+        self,
+        *,
+        scope: str,
+        url: str,
+        exc: Exception,
+        level: int = logging.WARNING,
+    ) -> None:
+        status_code = self._get_http_status_code(exc)
+        if self._is_request_failure(exc):
+            self.logger.log(
+                level,
+                "Monetka: %s unavailable %s status_code=%s error=%s",
+                scope,
+                url,
+                status_code,
+                exc,
+            )
+            return
+        self.logger.log(level, "Monetka: failed %s %s: %s", scope, url, exc)
 
     def _get_text_with_final_url(self, url: str) -> tuple[str, str]:
         if hasattr(self.client, "get_text_with_final_url"):
@@ -790,20 +828,14 @@ class MonetkaParser:
         cleaned = re.sub(r"^адрес\s*[:\-]?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^у\s+ул\.?\s*", "ул. ", cleaned, flags=re.IGNORECASE)
         if re.match(r"^у\s+", cleaned, flags=re.IGNORECASE):
-            rest = re.sub(r"^у\s+", "", cleaned, flags=re.IGNORECASE).strip()
-            parts = [part.strip() for part in rest.split(",")]
-            if len(parts) >= 3:
-                cleaned = rest
-            elif len(parts) == 2:
-                cleaned = f"ул. {rest}"
-            else:
-                cleaned = rest
+            cleaned = re.sub(r"^у\s+", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"^ул\s+", "ул. ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^пер\s+", "пер. ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^пр[- ]?кт\s+", "пр-кт ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"^просп\s+", "просп. ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s+,", ",", cleaned)
         cleaned = re.sub(r",\s*,+", ", ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;")
         return cleaned or None
 
     @staticmethod
@@ -820,6 +852,8 @@ class MonetkaParser:
                     details["work_time"] = value
                 elif "формат" in key_lower:
                     details["store_format"] = value
+                elif "статус" in key_lower or "status" in key_lower:
+                    details["status"] = value
                 elif "тел" in key_lower:
                     details["phone"] = value
                 elif any(token in key_lower for token in ("город", "населен", "city", "locality")):
@@ -1024,6 +1058,24 @@ class MonetkaParser:
             if lat_value is not None and lng_value is not None:
                 return lat_value, lng_value
 
+        meta_pairs = (
+            (
+                'meta[property="place:location:latitude"][content]',
+                'meta[property="place:location:longitude"][content]',
+                "content",
+            ),
+            ('[itemprop="latitude"][content]', '[itemprop="longitude"][content]', "content"),
+        )
+        for lat_selector, lng_selector, attr_name in meta_pairs:
+            lat_node = soup.select_one(lat_selector)
+            lng_node = soup.select_one(lng_selector)
+            if not lat_node or not lng_node:
+                continue
+            lat_value = MonetkaParser._to_float(lat_node.get(attr_name))
+            lng_value = MonetkaParser._to_float(lng_node.get(attr_name))
+            if lat_value is not None and lng_value is not None:
+                return lat_value, lng_value
+
         joined_scripts = " ".join(script.get_text(" ", strip=True) for script in soup.find_all("script"))
         if not joined_scripts:
             return None, None
@@ -1045,6 +1097,24 @@ class MonetkaParser:
             if lat_value is not None and lng_value is not None:
                 return lat_value, lng_value
         return None, None
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        cleaned = cleaned.replace(",", ".")
+        cleaned = re.sub(r"[^0-9.\-]+", "", cleaned)
+        if not cleaned or cleaned in {"-", ".", "-."}:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
 
     @staticmethod
     def _slug_to_name(slug: str | None) -> str | None:

@@ -1,36 +1,25 @@
 # project_parser
 
-Проект собирает данные о магазинах из официальных источников трех сетей:
+Parser suite for collecting store data from official retail sources, normalizing it into a single schema, and exporting the result as Excel plus snapshot-based diff.
+
+## Supported Networks
 
 - Красное & Белое
 - Монетка
 - Мария-Ра
 
-Все парсеры приводят результат к единой модели `StoreRecord`, сохраняют Excel-отчет и поддерживают diff между двумя полными снапшотами.
+## Core Features
 
-## Что собирается
+- Collects store data into a unified `StoreRecord` schema
+- Saves the current full dataset to Excel
+- Persists a JSON snapshot and computes diff between full runs
+- Exposes a simple CLI for full or per-network execution
 
-Обязательные поля записи:
+Unified output fields:
 
-- `network`
-- `region`
-- `city`
-- `address`
-- `work_time`
-- `latitude`
-- `longitude`
-- `source_url`
-- `collected_at`
+`network`, `region`, `city`, `address`, `work_time`, `latitude`, `longitude`, `phone`, `store_format`, `status`, `source_url`, `collected_at`
 
-Дополнительные поля сохраняются, если их отдает источник:
-
-- `phone`
-- `store_format`
-- `status`
-
-Если источник не отдает поле стабильно или вообще не публикует его, в итоговой записи остается `None`.
-
-## Установка
+## Installation
 
 ```bash
 python -m venv .venv
@@ -38,35 +27,46 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Для локальной конфигурации можно создать `.env` на основе `.env.example`:
+Optional local config:
 
 ```bash
 copy .env.example .env
 ```
 
-Поддерживаемые env-переменные:
-
-- `STORE_PARSER_OUTPUT` — путь к Excel-файлу
-- `STORE_PARSER_SNAPSHOT` — путь к snapshot JSON
-- `STORE_PARSER_LOG_FILE` — путь к лог-файлу
-- `STORE_PARSER_LOG_LEVEL` — уровень логирования
-- `STORE_PARSER_TIMEOUT` — HTTP timeout в секундах
-
-Для fallback в `MariaRaParser` при необходимости можно установить браузер Playwright:
+Optional Playwright install for Maria-Ra fallback:
 
 ```bash
 playwright install chromium
 ```
 
-## Запуск
+## Configuration
 
-Запуск всех парсеров:
+Project configuration is intentionally minimal. Defaults can be overridden via `.env`, and `--output` / `--snapshot` CLI flags override env values.
+
+Supported env variables:
+
+- `STORE_PARSER_OUTPUT` — Excel report path
+- `STORE_PARSER_SNAPSHOT` — snapshot JSON path; if omitted, it is derived from the Excel filename
+- `STORE_PARSER_LOG_FILE` — log file path
+- `STORE_PARSER_LOG_LEVEL` — log level
+- `STORE_PARSER_TIMEOUT` — HTTP timeout in seconds
+- `STORE_PARSER_RETRIES` — HTTP retry count for temporary failures
+
+Example:
+
+```bash
+copy .env.example .env
+```
+
+## Run
+
+Full run:
 
 ```bash
 python main.py run
 ```
 
-Запуск одной сети:
+Single network:
 
 ```bash
 python main.py run --network kb
@@ -74,169 +74,67 @@ python main.py run --network monetka
 python main.py run --network maria_ra
 ```
 
-Переопределение путей:
+Custom output paths:
 
 ```bash
-python main.py run --output output/stores.xlsx
-python main.py run --snapshot output/stores_snapshot.json
+python main.py run --output output/stores.xlsx --snapshot output/stores_snapshot.json
 ```
 
-`python main.py` без подкоманды тоже запускает полный сбор для обратной совместимости.
+`python main.py` without subcommand is also supported for backward compatibility.
 
-## Что создается на выходе
+## Output
 
-После запуска проект формирует:
+Default artifacts:
 
 - `output/stores.xlsx`
 - `output/stores_snapshot.json`
 - `logs/parser.log`
 
-## Как работает diff
+`stores.xlsx` contains:
 
-Diff строится не по предыдущему Excel, а по отдельному snapshot JSON.
+- `Актуальные данные`
+- `Изменения`
+- `Статистика`
 
-1. При запуске проект читает предыдущий snapshot.
-2. Текущие записи приводятся к детерминированному виду и получают stable key.
-3. Сравнение выполняется по stable key и отслеживаемым полям.
-4. После успешной выгрузки snapshot перезаписывается новым полным срезом.
+## Diff
 
-Важно:
+Diff is built against `stores_snapshot.json`, not against the previous Excel file.
 
-- На самом первом запуске, когда baseline еще нет, лист `Изменения` остается пустым. Это нормальное поведение: первый запуск только инициализирует baseline.
-- Начиная со второго полного запуска по тому же `snapshot` будут появляться `added`, `removed` и `changed`.
-- Stable key опирается на сеть, store-specific URL, координаты и fallback по локации/адресу, поэтому изменения адреса при стабильном URL попадают в `changed`, а не в `added+removed`.
+- `added` — store exists in the new full snapshot and did not exist in the previous one
+- `removed` — store existed in the previous full snapshot and is missing in the new one
+- `changed` — store is matched by stable key, but tracked fields changed
 
-## Как читать Excel
+First run initializes the baseline snapshot and keeps the `Изменения` sheet empty. Re-running on the same data with the same snapshot should produce zero changes.
 
-### Актуальные данные
+## Project Structure
 
-Полный текущий срез магазинов.
+```text
+project_parser/
+  core/
+  parsers/
+  tests/
+  docs/
+  main.py
+  requirements.txt
+```
 
-### Изменения
+## Limitations / Known Issues
 
-Изменения относительно предыдущего полного snapshot:
+- Source websites can change HTML, JS, or internal endpoints without notice.
+- Some fields are not consistently available from source systems. In that case the project stores `null` instead of inventing values.
+- Monetka may return `404` for some city pages and detail pages. These errors are logged, the full run continues, and partial store data is kept when it is already available.
+- Diff quality depends on comparing full runs against the same snapshot baseline.
 
-- `added` — новая запись
-- `removed` — запись исчезла из нового полного среза
-- `changed` — запись осталась той же, но изменились поля
+## Scheduled Execution
 
-Поля `old_value` и `new_value` содержат только изменившиеся значения для `changed`.
-
-### Статистика
-
-Количество магазинов по сетям для текущего Excel-среза.
-
-Excel форматируется автоматически:
-
-- заморожена строка заголовка
-- включен autofilter
-- ширины колонок подбираются автоматически
-
-## Обработка ошибок и частичных отказов
-
-### Монетка и HTTP 404
-
-У Монетки встречаются `404` как на city pages, так и на detail pages.
-
-Текущее поведение проекта:
-
-- `404` на detail page не валит общий процесс
-- если магазин уже виден на city page, запись сохраняется частично из city list
-- для частично восстановленной записи сохраняются хотя бы `city`, `region`, `address`, `work_time`, `source_url`, если эти поля были доступны
-- проблема логируется в `logs/parser.log`
-- обработка остальных магазинов продолжается
-
-Ограничение:
-
-- если `404` возвращает сама city page и оттуда нельзя получить список магазинов, проект не выдумывает записи и только логирует пропуск города
-
-### Maria-Ra
-
-- источник не всегда отдает `region`, поэтому `region=None` — ожидаемое поведение для части записей
-- `city` извлекается только из реально доступных данных, без геокодинга и угадывания
-
-### Сетевые ошибки
-
-- HTTP-запросы идут через `requests.Session` с retry на временные ошибки
-- падение одного парсера не должно останавливать остальные
-- все ошибки попадают в лог
-
-## Восстановление после ошибок
-
-Если запуск оборвался или дал частичный результат:
-
-1. Проверьте `logs/parser.log` и найдите первый массовый сбой.
-2. Не удаляйте snapshot без причины: это baseline для diff.
-3. Если snapshot поврежден или baseline нужно собрать заново, удалите только `stores_snapshot.json` и выполните полный запуск еще раз.
-4. Если проблема была сетевой, повторите запуск тем же `--snapshot`, чтобы diff продолжил строиться от прежнего baseline.
-
-## Запуск по расписанию
-
-### Windows Task Scheduler
-
-Пример команды:
+Windows Task Scheduler:
 
 ```bash
 cmd /c "cd /d C:\path\to\project_parser && .venv\Scripts\python.exe main.py run"
 ```
 
-### cron / WSL
-
-Пример:
+cron / WSL:
 
 ```bash
 0 6 * * * cd /path/to/project_parser && .venv/bin/python main.py run >> cron.log 2>&1
 ```
-
-Для WSL в репозитории есть вспомогательный скрипт:
-
-```bash
-./run_wsl.sh setup
-./run_wsl.sh test
-./run_wsl.sh run
-```
-
-## Тесты
-
-Полный прогон:
-
-```bash
-python -m pytest -q
-```
-
-Покрыты как минимум:
-
-- модель данных
-- diff/snapshot логика
-- Excel-выгрузка
-- критичные части нормализации парсеров
-- 404/fallback сценарии у Монетки
-
-## Структура проекта
-
-```text
-project_parser/
-  core/
-    diff.py
-    excel_export.py
-    http_client.py
-    logging_config.py
-    models.py
-  parsers/
-    kb_parser.py
-    maria_ra_parser.py
-    monetka_parser.py
-  tests/
-  docs/
-  .env.example
-  main.py
-  requirements.txt
-  pytest.ini
-```
-
-## Известные ограничения
-
-- внешние сайты могут менять HTML, JS и внутренние endpoint-ы без предупреждения
-- `Maria-Ra` не всегда публикует `region`; в таких случаях проект сохраняет `None`
-- `Monetka` не всегда публикует координаты и формат магазина на detail page; проект не выдумывает эти поля
-- корректность diff зависит от того, что сравниваются два полных среза и используется один и тот же snapshot baseline

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.models import StoreRecord
+from core.models import STORE_OUTPUT_COLUMNS, StoreRecord, normalize_store_output_row
 
 
 def test_store_record_build_sets_required_fields() -> None:
@@ -23,20 +23,7 @@ def test_store_record_to_dict_contains_all_keys() -> None:
     record = StoreRecord.build(network="N", source_url="https://example.com")
     data = record.to_dict()
 
-    expected_keys = {
-        "network",
-        "region",
-        "city",
-        "address",
-        "work_time",
-        "latitude",
-        "longitude",
-        "phone",
-        "store_format",
-        "status",
-        "source_url",
-        "collected_at",
-    }
+    expected_keys = set(STORE_OUTPUT_COLUMNS)
     assert set(data.keys()) == expected_keys
 
 
@@ -72,3 +59,23 @@ def test_store_record_stable_key_is_same_for_monetka_store_alias_urls() -> None:
     )
 
     assert first.stable_key() == second.stable_key()
+
+
+def test_normalize_store_output_row_maps_legacy_aliases_to_canonical_schema() -> None:
+    row = normalize_store_output_row(
+        {
+            "network": "N",
+            "city": "Novosibirsk",
+            "address": " Novosibirsk, ул. Ленина, 1 ",
+            "lat": "55.03",
+            "lng": "82.92",
+            "parsed_at": "2026-03-17T00:00:00+00:00",
+            "source_url": "https://example.com/store/1",
+        }
+    )
+
+    assert list(row.keys()) == STORE_OUTPUT_COLUMNS
+    assert row["address"] == "ул. Ленина, 1"
+    assert row["latitude"] == 55.03
+    assert row["longitude"] == 82.92
+    assert row["collected_at"] == "2026-03-17T00:00:00+00:00"

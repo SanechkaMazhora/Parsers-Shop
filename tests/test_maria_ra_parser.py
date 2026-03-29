@@ -78,6 +78,38 @@ def test_clean_city_and_address_extracts_locality_when_address_has_street_part()
     assert address == "ул. Кольцевая, 11а"
 
 
+def test_clean_city_and_address_extracts_village_prefix_with_dot() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "д. Бурмистрово, ул. Центральная, 30б")
+
+    assert city == "д. Бурмистрово"
+    assert address == "ул. Центральная, 30б"
+
+
+def test_clean_city_and_address_extracts_urban_settlement_prefix_with_spaces() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "р. п. Горный, ул. Космическая, 10/2")
+
+    assert city == "р. п. Горный"
+    assert address == "ул. Космическая, 10/2"
+
+
+def test_clean_city_and_address_extracts_station_prefix() -> None:
+    city, address = MariaRaParser._clean_city_and_address(None, "ст. Мочище, ул. Линейная, 64")
+
+    assert city == "ст. Мочище"
+    assert address == "ул. Линейная, 64"
+
+
+def test_clean_city_and_address_splits_merged_city_with_tract_address() -> None:
+    city, address = MariaRaParser._clean_city_and_address("г Барнаул Павловский тракт, 188", None)
+
+    assert city == "Барнаул"
+    assert address == "Павловский тракт, 188"
+
+
+def test_clean_address_normalizes_obvious_noise() -> None:
+    assert MariaRaParser._clean_address(" Адрес магазина: ул.Ленина,, 1; ") == "ул. Ленина, 1"
+
+
 def test_normalize_store_builds_unique_source_url_from_coordinates() -> None:
     parser = MariaRaParser(client=None)
 
@@ -90,3 +122,96 @@ def test_normalize_store_builds_unique_source_url_from_coordinates() -> None:
     )
 
     assert record.source_url == "https://www.maria-ra.ru/o-kompanii/karta-seti/#store=55.030000,82.920000"
+
+
+def test_normalize_store_extracts_region_and_city_from_address_prefix() -> None:
+    parser = MariaRaParser(client=None)
+
+    record = parser._normalize_store(
+        {
+            "address": "Алтайский край, г. Барнаул, ул. Попова, 1",
+        }
+    )
+
+    assert record.region == "Алтайский край"
+    assert record.city == "Барнаул"
+    assert record.address == "ул. Попова, 1"
+
+
+def test_normalize_store_keeps_missing_optional_fields_as_none() -> None:
+    parser = MariaRaParser(client=None)
+
+    record = parser._normalize_store(
+        {
+            "address": "Змеиногорский тракт, 71в",
+        }
+    )
+
+    assert record.region is None
+    assert record.city is None
+    assert record.address == "Змеиногорский тракт, 71в"
+    assert record.latitude is None
+    assert record.longitude is None
+    assert record.store_format is None
+    assert record.status is None
+
+
+def test_normalize_raw_js_item_extracts_popup_metadata_when_present() -> None:
+    parser = MariaRaParser(client=None)
+
+    raw_item = {
+        "popup": """
+            <div>
+              Город: Бийск<br>
+              Регион: Алтайский край<br>
+              Адрес магазина: ул. Ленина, 1<br>
+              Формат магазина: Супермаркет<br>
+              Статус: Открыт<br>
+              Телефон: 8-800-123-45-67
+            </div>
+        """,
+        "lat": "52,54",
+        "lng": "85.21",
+    }
+
+    normalized = parser._normalize_raw_js_item(raw_item)
+
+    assert normalized is not None
+    record = parser._normalize_store(normalized)
+
+    assert record.city == "Бийск"
+    assert record.region == "Алтайский край"
+    assert record.address == "ул. Ленина, 1"
+    assert record.latitude == 52.54
+    assert record.longitude == 85.21
+    assert record.phone == "8-800-123-45-67"
+    assert record.store_format == "Супермаркет"
+    assert record.status == "Открыт"
+
+
+def test_normalize_raw_js_item_with_partial_popup_keeps_missing_fields_as_none() -> None:
+    parser = MariaRaParser(client=None)
+
+    raw_item = {
+        "popup": """
+            <div>
+              Город: г. Новосибирск<br>
+              Адрес магазина: г. Новосибирск, ул.Ленина,, 1;
+            </div>
+        """,
+    }
+
+    normalized = parser._normalize_raw_js_item(raw_item)
+
+    assert normalized is not None
+    record = parser._normalize_store(normalized)
+
+    assert record.city == "Новосибирск"
+    assert record.address == "ул. Ленина, 1"
+    assert record.region is None
+    assert record.work_time is None
+    assert record.latitude is None
+    assert record.longitude is None
+    assert record.phone is None
+    assert record.store_format is None
+    assert record.status is None

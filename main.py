@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from time import perf_counter
 from typing import Protocol
 
 from dotenv import load_dotenv
 
+from core.config import get_default_output_path, get_default_snapshot_path
 from core.excel_export import export_stores_to_excel
 from core.logging_config import setup_logging
 from core.models import StoreRecord
@@ -23,17 +23,6 @@ class ParserInterface(Protocol):
 
     def parse(self) -> list[StoreRecord]:
         """Parse stores and return unified records."""
-
-
-def get_default_output_path() -> str:
-    """Resolve default workbook path from environment."""
-    return os.getenv("STORE_PARSER_OUTPUT", "output/stores.xlsx")
-
-
-def get_default_snapshot_path() -> str | None:
-    """Resolve optional snapshot path from environment."""
-    return os.getenv("STORE_PARSER_SNAPSHOT")
-
 
 def build_parser() -> argparse.ArgumentParser:
     """Build top-level CLI parser."""

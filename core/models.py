@@ -8,7 +8,7 @@ import hashlib
 import re
 from typing import Any, Mapping
 
-STORE_EXPORT_COLUMNS = [
+STORE_OUTPUT_COLUMNS = [
     "network",
     "region",
     "city",
@@ -22,6 +22,13 @@ STORE_EXPORT_COLUMNS = [
     "source_url",
     "collected_at",
 ]
+STORE_EXPORT_COLUMNS = STORE_OUTPUT_COLUMNS
+STORE_SNAPSHOT_COLUMNS = [*STORE_OUTPUT_COLUMNS, "stable_key"]
+LEGACY_STORE_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "latitude": ("lat",),
+    "longitude": ("lng", "lon"),
+    "collected_at": ("parsed_at",),
+}
 
 
 def normalize_optional_text(value: Any) -> str | None:
@@ -77,6 +84,34 @@ def normalize_source_url(value: Any) -> str:
     return cleaned or ""
 
 
+def _get_store_field_value(data: Mapping[str, Any], field_name: str) -> Any:
+    if field_name in data:
+        return data.get(field_name)
+    for alias in LEGACY_STORE_FIELD_ALIASES.get(field_name, ()):
+        if alias in data:
+            return data.get(alias)
+    return None
+
+
+def normalize_store_output_row(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert arbitrary store-like mappings to the canonical output schema."""
+    normalized_city = normalize_optional_text(_get_store_field_value(data, "city"))
+    return {
+        "network": normalize_optional_text(_get_store_field_value(data, "network")) or "",
+        "region": normalize_optional_text(_get_store_field_value(data, "region")),
+        "city": normalized_city,
+        "address": normalize_address(_get_store_field_value(data, "address"), city_hint=normalized_city),
+        "work_time": normalize_optional_text(_get_store_field_value(data, "work_time")),
+        "latitude": normalize_coordinate(_get_store_field_value(data, "latitude")),
+        "longitude": normalize_coordinate(_get_store_field_value(data, "longitude")),
+        "phone": normalize_optional_text(_get_store_field_value(data, "phone")),
+        "store_format": normalize_optional_text(_get_store_field_value(data, "store_format")),
+        "status": normalize_optional_text(_get_store_field_value(data, "status")),
+        "source_url": normalize_source_url(_get_store_field_value(data, "source_url")),
+        "collected_at": normalize_optional_text(_get_store_field_value(data, "collected_at")),
+    }
+
+
 def normalize_compare_source_url(value: Any) -> str:
     """Normalize source URLs for diff/stable-key comparison."""
     source_url = normalize_source_url(value)
@@ -110,12 +145,13 @@ def is_store_specific_source_url(value: Any) -> bool:
 
 def build_store_stable_key(data: Mapping[str, Any]) -> str:
     """Build a stable identity key for diffing snapshots across runs."""
-    latitude = data.get("latitude", data.get("lat"))
-    longitude = data.get("longitude", data.get("lng"))
-    city = normalize_optional_text(data.get("city"))
+    normalized = normalize_store_output_row(data)
+    latitude = normalized.get("latitude")
+    longitude = normalized.get("longitude")
+    city = normalized.get("city")
 
-    parts = [f"network:{normalize_text_token(data.get('network'))}"]
-    source_url = normalize_compare_source_url(data.get("source_url"))
+    parts = [f"network:{normalize_text_token(normalized.get('network'))}"]
+    source_url = normalize_compare_source_url(normalized.get("source_url"))
     if source_url:
         parts.append(f"url:{source_url}")
 
@@ -127,11 +163,11 @@ def build_store_stable_key(data: Mapping[str, Any]) -> str:
     needs_location_fallback = not is_store_specific_source_url(source_url)
     if needs_location_fallback:
         for field_name in ("region", "city"):
-            token = normalize_text_token(data.get(field_name))
+            token = normalize_text_token(normalized.get(field_name))
             if token:
                 parts.append(f"{field_name}:{token}")
 
-        address = normalize_address(data.get("address"), city_hint=city)
+        address = normalize_address(normalized.get("address"), city_hint=city)
         address_token = normalize_text_token(address)
         if address_token:
             parts.append(f"address:{address_token}")
@@ -220,7 +256,8 @@ class StoreRecord:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert dataclass to dictionary for export/snapshots."""
-        return {
+        return normalize_store_output_row(
+            {
             "network": self.network,
             "region": self.region,
             "city": self.city,
@@ -233,7 +270,8 @@ class StoreRecord:
             "status": self.status,
             "source_url": self.source_url,
             "collected_at": self.collected_at,
-        }
+            }
+        )
 
     def to_snapshot_dict(self) -> dict[str, Any]:
         """Convert record to a snapshot row with a stable diff key."""

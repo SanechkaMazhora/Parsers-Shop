@@ -17,9 +17,9 @@ from core.diff import (
     load_snapshot_with_meta,
     save_snapshot,
 )
-from core.models import STORE_EXPORT_COLUMNS, StoreRecord
+from core.models import STORE_OUTPUT_COLUMNS, StoreRecord
 
-DATA_COLUMNS = STORE_EXPORT_COLUMNS
+DATA_COLUMNS = STORE_OUTPUT_COLUMNS
 STATS_COLUMNS = ["network", "stores_count"]
 
 DATA_SHEET_NAME = "Актуальные данные"
