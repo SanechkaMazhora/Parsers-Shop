@@ -73,9 +73,58 @@ def normalize_address(value: Any, *, city_hint: str | None = None) -> str | None
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     if city_hint and "," in cleaned:
         left, right = [part.strip() for part in cleaned.split(",", 1)]
-        if normalize_text_token(left) == normalize_text_token(city_hint) and right:
+        if (
+            normalize_text_token(left) == normalize_text_token(city_hint)
+            and right
+            and _is_informative_address_fragment(right)
+        ):
             cleaned = right
     return cleaned or None
+
+
+def _is_informative_address_fragment(value: Any) -> bool:
+    """Keep locality prefixes when stripping them would leave only a house number."""
+    cleaned = normalize_optional_text(value)
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    street_markers = (
+        "ул",
+        "улиц",
+        "просп",
+        "пр-кт",
+        "пр-т",
+        "пер",
+        "переул",
+        "б-р",
+        "бул",
+        "мкр",
+        "кв-л",
+        "шоссе",
+        "тракт",
+        "проезд",
+        "наб",
+        "площад",
+        "аллея",
+        "линия",
+        "квартал",
+        "террит",
+    )
+    if any(marker in lowered for marker in street_markers):
+        return True
+
+    if not (re.search(r"\d", lowered) and re.search(r"[a-zа-яё]", lowered)):
+        return False
+
+    house_only_patterns = (
+        r"^(?:д\.?|дом|зд\.?|здание|стр\.?|строение|корп\.?|к\.?)\s*\d+[a-zа-яё]?(?:/\d+[a-zа-яё]?)?$",
+        r"^\d+[a-zа-яё]?(?:/\d+[a-zа-яё]?)?(?:\s*(?:д\.?|дом|зд\.?|здание|стр\.?|строение|корп\.?|к\.?)\s*\d+[a-zа-яё]?)?$",
+    )
+    if any(re.fullmatch(pattern, lowered, flags=re.IGNORECASE) for pattern in house_only_patterns):
+        return False
+
+    return True
 
 
 def normalize_source_url(value: Any) -> str:

@@ -54,8 +54,8 @@ class HttpClient:
             response = self.session.get(url, timeout=timeout, **kwargs)
             response.raise_for_status()
             return response.text, response.url
-        except RequestException:
-            self.logger.error("HTTP text request failed: %s", url)
+        except RequestException as exc:
+            self.logger.debug("HTTP text request failed: %s: %s", url, exc)
             raise
 
     def get_json(self, url: str, **kwargs: Any) -> Any:
@@ -68,6 +68,6 @@ class HttpClient:
         except ValueError as exc:
             self.logger.error("Invalid JSON response from %s: %s", url, exc)
             raise
-        except RequestException:
-            self.logger.error("HTTP JSON request failed: %s", url)
+        except RequestException as exc:
+            self.logger.debug("HTTP JSON request failed: %s: %s", url, exc)
             raise

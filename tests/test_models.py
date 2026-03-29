@@ -79,3 +79,27 @@ def test_normalize_store_output_row_maps_legacy_aliases_to_canonical_schema() ->
     assert row["latitude"] == 55.03
     assert row["longitude"] == 82.92
     assert row["collected_at"] == "2026-03-17T00:00:00+00:00"
+
+
+def test_store_record_build_keeps_locality_prefix_when_only_house_number_remains() -> None:
+    record = StoreRecord.build(
+        network="N",
+        city="Береславка п",
+        address="Береславка п, 1А",
+        source_url="https://example.com/store/1",
+    )
+
+    assert record.address == "Береславка п, 1А"
+
+
+def test_normalize_store_output_row_keeps_full_address_when_city_prefix_is_required() -> None:
+    row = normalize_store_output_row(
+        {
+            "network": "N",
+            "city": "рп Краснообск",
+            "address": "рп Краснообск, 207",
+            "source_url": "https://example.com/store/1",
+        }
+    )
+
+    assert row["address"] == "рп Краснообск, 207"
