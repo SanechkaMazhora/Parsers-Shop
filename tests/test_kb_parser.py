@@ -44,6 +44,46 @@ def test_normalize_shop_uses_shop_city_region_as_priority() -> None:
     assert record.region == "Новосибирская область"
 
 
+def test_normalize_shop_accepts_coordinate_aliases() -> None:
+    parser = KBParser(client=None)
+    shop = {
+        "address": "ул. Ленина, 5",
+        "cityName": "Омск",
+        "regionName": "Омская область",
+        "latitude": "54.9918",
+        "longitude": "73.3715",
+    }
+
+    record = parser._normalize_shop(
+        shop,
+        city_id=2,
+        city_name="Fallback City",
+        region="Fallback Region",
+    )
+
+    assert record.latitude == 54.9918
+    assert record.longitude == 73.3715
+
+
+def test_normalize_shop_keeps_partial_longitude_without_inventing_latitude() -> None:
+    parser = KBParser(client=None)
+    shop = {
+        "address": "ул. Мира, 7",
+        "cityName": "Томск",
+        "lon": "84.9744",
+    }
+
+    record = parser._normalize_shop(
+        shop,
+        city_id=3,
+        city_name="Fallback City",
+        region="Fallback Region",
+    )
+
+    assert record.latitude is None
+    assert record.longitude == 84.9744
+
+
 def test_extract_city_list_filters_shop_like_payload() -> None:
     payload = [
         {"id": 1, "name": "Томск", "regionId": 10},

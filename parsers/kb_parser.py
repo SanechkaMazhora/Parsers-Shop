@@ -231,13 +231,29 @@ class KBParser:
             city=resolved_city,
             address=self._extract_address(shop),
             work_time=self._format_work_time(shop.get("workTime") or shop.get("work_time")),
-            lat=self._to_float(shop.get("lat")),
-            lng=self._to_float(shop.get("lng")),
+            lat=self._extract_latitude(shop),
+            lng=self._extract_longitude(shop),
             phone=self._extract_phone(shop),
             store_format=self._extract_store_format(shop),
             status=self._extract_status(shop),
             source_url=source_url,
         )
+
+    @classmethod
+    def _extract_latitude(cls, shop: dict[str, Any]) -> float | None:
+        return cls._extract_coordinate(shop, "latitude", "lat")
+
+    @classmethod
+    def _extract_longitude(cls, shop: dict[str, Any]) -> float | None:
+        return cls._extract_coordinate(shop, "longitude", "lng", "lon")
+
+    @classmethod
+    def _extract_coordinate(cls, payload: dict[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            value = cls._to_float(payload.get(key))
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

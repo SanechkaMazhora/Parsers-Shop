@@ -76,13 +76,19 @@ def _snapshot_row_completeness(row: Mapping[str, Any]) -> int:
     return sum(1 for field_name in SNAPSHOT_SORT_FIELDS if row.get(field_name) not in (None, ""))
 
 
+def _snapshot_row_preference_key(row: Mapping[str, Any]) -> tuple[int, tuple[str, ...]]:
+    """Rank duplicate stable-key rows by completeness first, then deterministic row order."""
+    return _snapshot_row_completeness(row), _snapshot_row_sort_key(row)
+
+
 def _build_snapshot_map(snapshot: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """Build a deterministic stable-key map, preferring richer rows on collisions."""
-    normalized_rows = [_normalize_snapshot_row(item) for item in snapshot]
-    normalized_rows.sort(key=lambda row: (_snapshot_row_completeness(row), _snapshot_row_sort_key(row)))
     snapshot_map: dict[str, dict[str, Any]] = {}
-    for row in normalized_rows:
-        snapshot_map[row["stable_key"]] = row
+    for item in snapshot:
+        row = _normalize_snapshot_row(item)
+        existing = snapshot_map.get(row["stable_key"])
+        if existing is None or _snapshot_row_preference_key(row) >= _snapshot_row_preference_key(existing):
+            snapshot_map[row["stable_key"]] = row
     return snapshot_map
 
 
@@ -96,8 +102,8 @@ def _serialize_payload(data: Mapping[str, Any] | None) -> str | None:
 
 
 def build_snapshot_rows(stores: Iterable[StoreRecord]) -> list[dict[str, Any]]:
-    """Convert records to deterministic snapshot rows."""
-    rows = [store.to_snapshot_dict() for store in stores]
+    """Convert records to deterministic snapshot rows without duplicate stable keys."""
+    rows = list(_build_snapshot_map(store.to_snapshot_dict() for store in stores).values())
     rows.sort(key=_snapshot_row_sort_key)
     return rows
 
@@ -130,7 +136,10 @@ def load_snapshot_with_meta(snapshot_path: str | Path) -> SnapshotLoadResult:
     if not isinstance(stores, list):
         return SnapshotLoadResult(rows=[], status="invalid")
     return SnapshotLoadResult(
-        rows=[_normalize_snapshot_row(item) for item in stores if isinstance(item, dict)],
+        rows=sorted(
+            _build_snapshot_map(item for item in stores if isinstance(item, dict)).values(),
+            key=_snapshot_row_sort_key,
+        ),
         status="loaded",
     )
 

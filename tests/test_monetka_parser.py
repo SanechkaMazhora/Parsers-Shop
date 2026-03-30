@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from requests import HTTPError, Response, Timeout
 from bs4 import BeautifulSoup
 
@@ -7,7 +9,7 @@ from core.models import StoreRecord
 from parsers.monetka_parser import MonetkaParser
 
 
-def test_extract_city_region_falls_back_to_url_slugs() -> None:
+def test_extract_city_region_requires_explicit_detail_geography() -> None:
     soup = BeautifulSoup("<html><body>No breadcrumbs</body></html>", "lxml")
 
     city, region = MonetkaParser._extract_city_region(
@@ -15,16 +17,29 @@ def test_extract_city_region_falls_back_to_url_slugs() -> None:
         "https://www.monetka.ru/orenburgskaya-oblasty/shops_map/aleksandrovka/123",
     )
 
-    assert city == "Aleksandrovka"
-    assert region == "Orenburgskaya Oblasty"
+    assert city is None
+    assert region is None
 
 
-def test_apply_city_context_overrides_generic_ekb_url_context() -> None:
+def test_apply_city_context_backfills_missing_region_when_city_matches() -> None:
     city, region = MonetkaParser._apply_city_context(
-        city="Ekaterinburg",
-        region="Sverdlovskaya Oblast",
+        city="Asbest",
+        region=None,
         context_city="Asbest",
         context_region="Sverdlovskaya Oblast",
+        source_url="https://www.monetka.ru/shops_map/ekb/4187",
+    )
+
+    assert city == "Asbest"
+    assert region == "Sverdlovskaya Oblast"
+
+
+def test_apply_city_context_keeps_explicit_detail_geography_on_conflict() -> None:
+    city, region = MonetkaParser._apply_city_context(
+        city="Asbest",
+        region="Sverdlovskaya Oblast",
+        context_city="Abatskoye",
+        context_region="Tyumenskaya Oblast",
         source_url="https://www.monetka.ru/shops_map/ekb/4187",
     )
 
@@ -145,6 +160,18 @@ def test_extract_city_links_with_hint_filters_malformed_hrefs() -> None:
 
     assert links == [("https://www.monetka.ru/urfo/shops_map/Aramil", "Aramil")]
     assert parser._city_links_filtered_count == 4
+
+
+def test_extract_city_context_does_not_use_city_page_url_slug_without_visible_signal() -> None:
+    parser = MonetkaParser(client=None)
+
+    city, region = parser._extract_city_context(
+        "<html><body>blank city page</body></html>",
+        "https://www.monetka.ru/urfo/shops_map/Asbest",
+    )
+
+    assert city is None
+    assert region is None
 
 
 def test_extract_store_summaries_reads_address_and_work_time_from_city_page() -> None:
@@ -393,6 +420,98 @@ def test_parse_continues_when_one_city_page_returns_404() -> None:
     assert "https://www.monetka.ru/region-a/shops_map/city-two" in parser.client.calls  # type: ignore[attr-defined]
 
 
+def test_parse_logs_expected_city_page_404_as_warning_not_error(caplog) -> None:
+    class FakeClient:
+        _pages = {
+            "https://www.monetka.ru/shops_map/": """
+                <a href="/region-a/change">Region A</a>
+            """,
+            "https://www.monetka.ru/region-a/change": """
+                <ul class="shop_city_list_ul">
+                  <li><a href="/region-a/shops_map/city-one">City One</a></li>
+                  <li><a href="/region-a/shops_map/city-two">City Two</a></li>
+                </ul>
+            """,
+            "https://www.monetka.ru/region-a/shops_map/city-two": """
+                <div class="shopstore">
+                  <a href="/shops_map/ekb/2">ул Лесная, 5</a>
+                  <div>9:00-21:00</div>
+                </div>
+            """,
+            "https://www.monetka.ru/shops_map/ekb/2": "<html></html>",
+        }
+
+        def get_text(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+            if url in self._pages:
+                return self._pages[url]
+            if url == "https://www.monetka.ru/region-a/shops_map/city-one":
+                response = Response()
+                response.status_code = 404
+                response.url = url
+                raise HTTPError("404 Client Error: Not Found", response=response)
+            raise RuntimeError(f"Unexpected URL: {url}")
+
+    parser = MonetkaParser(client=FakeClient())
+
+    with caplog.at_level(logging.WARNING):
+        stores = parser.parse()
+
+    assert len(stores) == 1
+    warning_records = [
+        record
+        for record in caplog.records
+        if "city/pagination page unavailable" in record.message and "status_code=404" in record.message
+    ]
+    assert warning_records
+    assert all(record.levelno == logging.WARNING for record in warning_records)
+    assert not any(
+        record.levelno >= logging.ERROR and "city/pagination page unavailable" in record.message
+        for record in caplog.records
+    )
+
+
+def test_parse_logs_unexpected_city_page_failure_as_error(caplog) -> None:
+    class FakeClient:
+        _pages = {
+            "https://www.monetka.ru/shops_map/": """
+                <a href="/region-a/change">Region A</a>
+            """,
+            "https://www.monetka.ru/region-a/change": """
+                <ul class="shop_city_list_ul">
+                  <li><a href="/region-a/shops_map/city-one">City One</a></li>
+                  <li><a href="/region-a/shops_map/city-two">City Two</a></li>
+                </ul>
+            """,
+            "https://www.monetka.ru/region-a/shops_map/city-two": """
+                <div class="shopstore">
+                  <a href="/shops_map/ekb/2">ул Лесная, 5</a>
+                  <div>9:00-21:00</div>
+                </div>
+            """,
+            "https://www.monetka.ru/shops_map/ekb/2": "<html></html>",
+        }
+
+        def get_text(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+            if url in self._pages:
+                return self._pages[url]
+            if url == "https://www.monetka.ru/region-a/shops_map/city-one":
+                raise RuntimeError("broken city page renderer")
+            raise RuntimeError(f"Unexpected URL: {url}")
+
+    parser = MonetkaParser(client=FakeClient())
+
+    with caplog.at_level(logging.WARNING):
+        stores = parser.parse()
+
+    assert len(stores) == 1
+    error_records = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR and "failed city/pagination page" in record.message
+    ]
+    assert error_records
+
+
 def test_parse_uses_partial_record_when_store_page_returns_404() -> None:
     class FakeClient:
         calls: list[str] = []
@@ -492,6 +611,10 @@ def test_parse_logs_warning_when_store_page_returns_404_and_partial_record_is_sa
     assert len(stores) == 1
     assert any("detail page unavailable, saved partial record" in record.message for record in caplog.records)
     assert any("status_code=404" in record.message for record in caplog.records)
+    assert not any(
+        record.levelno >= logging.ERROR and "detail page unavailable, saved partial record" in record.message
+        for record in caplog.records
+    )
 
 
 def test_parse_uses_partial_record_when_store_page_times_out() -> None:
@@ -602,3 +725,105 @@ def test_parse_store_page_prefers_explicit_location_and_extracts_status_and_coor
     assert record.longitude == 82.9876
     assert record.store_format == "Супермаркет"
     assert record.status == "Открыт"
+
+
+def test_parse_store_page_ignores_detail_title_and_technical_url_slug_without_context() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <head>
+        <title>Карта магазинов в Екатеринбурге — Магазины «Монетка» — Свердловская область</title>
+      </head>
+      <body>
+        <h1>Карта магазинов в Екатеринбурге</h1>
+        <span class="black dashed">Свердловская область</span>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(html, "https://www.monetka.ru/shops_map/ekb/1")
+
+    assert record.city is None
+    assert record.region is None
+
+
+def test_parse_store_page_uses_crawl_context_when_detail_page_has_only_generic_title() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <head>
+        <title>Карта магазинов в Екатеринбурге — Магазины «Монетка» — Свердловская область</title>
+      </head>
+      <body>
+        <h1>Карта магазинов в Екатеринбурге</h1>
+        <span class="black dashed">Свердловская область</span>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(
+        html,
+        "https://www.monetka.ru/shops_map/ekb/4187",
+        context_city="Асбест",
+        context_region="Свердловская область",
+    )
+
+    assert record.city == "Асбест"
+    assert record.region == "Свердловская область"
+
+
+def test_parse_store_page_prefers_explicit_detail_geography_over_conflicting_city_page_context() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <head>
+        <title>Карта магазинов в Екатеринбурге — Магазины «Монетка» — Свердловская область</title>
+      </head>
+      <body>
+        <h1>Карта магазинов в Екатеринбурге</h1>
+        <span class="black dashed">Свердловская область</span>
+        <dl>
+          <dt>Город</dt><dd>Асбест</dd>
+          <dt>Регион</dt><dd>Свердловская область</dd>
+        </dl>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(
+        html,
+        "https://www.monetka.ru/shops_map/ekb/4187",
+        context_city="Абатское",
+        context_region="Тюменская область",
+    )
+
+    assert record.city == "Асбест"
+    assert record.region == "Свердловская область"
+
+
+def test_parse_store_page_does_not_mix_explicit_detail_city_with_conflicting_context_region() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <head>
+        <title>Карта магазинов в Екатеринбурге — Магазины «Монетка» — Свердловская область</title>
+      </head>
+      <body>
+        <h1>Карта магазинов в Екатеринбурге</h1>
+        <span class="black dashed">Свердловская область</span>
+        <dl>
+          <dt>Город</dt><dd>Асбест</dd>
+        </dl>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(
+        html,
+        "https://www.monetka.ru/shops_map/ekb/4187",
+        context_city="Абатское",
+        context_region="Тюменская область",
+    )
+
+    assert record.city == "Асбест"
+    assert record.region is None

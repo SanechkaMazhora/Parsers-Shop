@@ -37,6 +37,11 @@ def _load_snapshot_store_keys(snapshot_path: Path) -> list[str]:
     return list(first_store.keys())
 
 
+def _load_snapshot_stores(snapshot_path: Path) -> list[dict[str, object]]:
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    return payload["stores"]
+
+
 def test_excel_export_creates_file_and_required_sheets() -> None:
     output_path = _unique_output_path()
     snapshot_path = _snapshot_path_for(output_path)
@@ -200,6 +205,66 @@ def test_excel_export_changes_sheet_payloads_use_canonical_schema() -> None:
         assert set(removed_payload.keys()) == set(STORE_OUTPUT_COLUMNS)
         assert "lat" not in added_payload and "lng" not in added_payload and "parsed_at" not in added_payload
         assert "lat" not in removed_payload and "lng" not in removed_payload and "parsed_at" not in removed_payload
+    finally:
+        if output_path.exists():
+            output_path.unlink()
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+
+
+def test_excel_export_deduplicates_duplicate_stable_key_in_data_sheet_and_snapshot() -> None:
+    output_path = _unique_output_path()
+    snapshot_path = _snapshot_path_for(output_path)
+    try:
+        stores = [
+            _make_store("n1", "c1", "a1", work_time=None),
+            _make_store("n1", "c1", "a1", work_time="09:00-18:00"),
+        ]
+
+        export_stores_to_excel(stores, output_path=str(output_path))
+
+        data_df = pd.read_excel(output_path, sheet_name=DATA_SHEET_NAME)
+        stats_df = pd.read_excel(output_path, sheet_name=STATS_SHEET_NAME)
+        snapshot_stores = _load_snapshot_stores(snapshot_path)
+
+        assert len(data_df) == 1
+        assert data_df.iloc[0]["work_time"] == "09:00-18:00"
+        assert stats_df.to_dict(orient="records") == [{"network": "n1", "stores_count": 1}]
+        assert len(snapshot_stores) == 1
+        assert snapshot_stores[0]["work_time"] == "09:00-18:00"
+    finally:
+        if output_path.exists():
+            output_path.unlink()
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+
+
+def test_excel_export_duplicate_stable_key_baseline_does_not_create_diff_noise() -> None:
+    output_path = _unique_output_path()
+    snapshot_path = _snapshot_path_for(output_path)
+    try:
+        first_run = [
+            _make_store("n1", "c1", "a1", work_time=None),
+            _make_store("n1", "c1", "a1", work_time="09:00-18:00"),
+        ]
+        second_run = [_make_store("n1", "c1", "a1", work_time="09:00-18:00")]
+
+        first_diff = export_stores_to_excel(first_run, output_path=str(output_path))
+        second_diff = export_stores_to_excel(second_run, output_path=str(output_path))
+
+        assert first_diff.is_initial_snapshot is True
+        assert second_diff.is_initial_snapshot is False
+        assert not second_diff.added
+        assert not second_diff.removed
+        assert not second_diff.changed
+
+        changes_df = pd.read_excel(output_path, sheet_name=CHANGES_SHEET_NAME)
+        data_df = pd.read_excel(output_path, sheet_name=DATA_SHEET_NAME)
+        snapshot_stores = _load_snapshot_stores(snapshot_path)
+
+        assert changes_df.empty
+        assert len(data_df) == 1
+        assert len(snapshot_stores) == 1
     finally:
         if output_path.exists():
             output_path.unlink()

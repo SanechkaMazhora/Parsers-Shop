@@ -215,6 +215,29 @@ def test_diff_prefers_richer_row_when_snapshot_contains_duplicate_stable_key() -
     assert diff_result.changed[0].new_value == {"work_time": "10:00-20:00"}
 
 
+def test_build_snapshot_rows_deduplicates_duplicate_stable_key_and_prefers_richer_row() -> None:
+    poorer = _make_store(
+        network="n1",
+        city="c1",
+        address="a1",
+        work_time=None,
+        source_url="https://example.com/store/1",
+    )
+    richer = _make_store(
+        network="n1",
+        city="c1",
+        address="a1",
+        work_time="10:00-20:00",
+        source_url="https://example.com/store/1",
+    )
+
+    snapshot = build_snapshot_rows([poorer, richer])
+
+    assert len(snapshot) == 1
+    assert snapshot[0]["stable_key"] == poorer.stable_key() == richer.stable_key()
+    assert snapshot[0]["work_time"] == "10:00-20:00"
+
+
 def test_diff_rows_keep_added_removed_changed_order_and_stable_detected_at() -> None:
     previous_snapshot = build_snapshot_rows(
         [
@@ -313,6 +336,40 @@ def test_snapshot_roundtrip_preserves_stable_keys() -> None:
         assert loaded_snapshot[0]["stable_key"] == stores[0].stable_key()
         assert loaded_snapshot[0]["latitude"] == 55.03
         assert loaded_snapshot[0]["longitude"] == 82.92
+    finally:
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+
+
+def test_save_and_load_snapshot_deduplicate_duplicate_stable_keys() -> None:
+    stores = [
+        _make_store(
+            city="Novosibirsk",
+            address="ул. Ленина, 1",
+            work_time=None,
+            source_url="https://example.com/store/1",
+        ),
+        _make_store(
+            city="Novosibirsk",
+            address="ул. Ленина, 1",
+            work_time="09:00-18:00",
+            source_url="https://example.com/store/1",
+        ),
+    ]
+    output_dir = Path("output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = output_dir / f"test_snapshot_dedup_{uuid4().hex}.json"
+
+    try:
+        save_snapshot(stores, snapshot_path)
+        loaded_snapshot = load_snapshot(snapshot_path)
+
+        assert len(loaded_snapshot) == 1
+        assert loaded_snapshot[0]["work_time"] == "09:00-18:00"
+
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        assert len(payload["stores"]) == 1
+        assert payload["stores"][0]["work_time"] == "09:00-18:00"
     finally:
         if snapshot_path.exists():
             snapshot_path.unlink()

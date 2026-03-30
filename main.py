@@ -17,12 +17,17 @@ from parsers.kb_parser import KBParser
 from parsers.maria_ra_parser import MariaRaParser
 from parsers.monetka_parser import MonetkaParser
 
+EXIT_SUCCESS = 0
+EXIT_RUNTIME_FAILURE = 1
+EXIT_INTERRUPTED = 130
+
 
 class ParserInterface(Protocol):
     """Type protocol for all parser classes."""
 
     def parse(self) -> list[StoreRecord]:
         """Parse stores and return unified records."""
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build top-level CLI parser."""
@@ -82,7 +87,7 @@ def run(
     )
 
     all_stores: list[StoreRecord] = []
-    failed_parsers = 0
+    failed_parsers: list[str] = []
 
     try:
         for parser_name, parser_instance in selected_parsers:
@@ -90,7 +95,7 @@ def run(
             try:
                 stores = parser_instance.parse()
             except Exception as exc:
-                failed_parsers += 1
+                failed_parsers.append(parser_name)
                 logger.error("Parser %s failed: %s", parser_name, exc, exc_info=True)
                 continue
 
@@ -98,6 +103,7 @@ def run(
             all_stores.extend(stores)
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
+        return EXIT_INTERRUPTED
 
     diff_result = export_stores_to_excel(
         all_stores,
@@ -114,8 +120,15 @@ def run(
         duration_seconds,
     )
     if failed_parsers:
-        logger.warning("Run completed with parser failures: %s of %s", failed_parsers, len(selected_parsers))
-    return 0
+        logger.error(
+            "Run finished with parser failures: failed=%s successful=%s total=%s exit_code=%s",
+            ",".join(failed_parsers),
+            len(selected_parsers) - len(failed_parsers),
+            len(selected_parsers),
+            EXIT_RUNTIME_FAILURE,
+        )
+        return EXIT_RUNTIME_FAILURE
+    return EXIT_SUCCESS
 
 
 def main() -> int:

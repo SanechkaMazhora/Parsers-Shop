@@ -208,10 +208,7 @@ class MonetkaParser:
     def _collect_city_hints(self, region_pages: list[str] | None = None) -> dict[str, str]:
         region_contexts: list[tuple[str, str | None]] | None = None
         if region_pages is not None:
-            region_contexts = [
-                (region_url, self._extract_region_name_from_change_url(region_url))
-                for region_url in region_pages
-            ]
+            region_contexts = [(region_url, None) for region_url in region_pages]
         city_contexts = self._collect_city_contexts(region_contexts=region_contexts)
         result: dict[str, str] = {}
         for city_url, (city_name, _region_name) in city_contexts.items():
@@ -255,7 +252,7 @@ class MonetkaParser:
             self._log_request_issue(scope="region page", url=region_url, exc=exc, level=logging.INFO)
             return result
 
-        resolved_region_name = self._sanitize_location(region_name) or self._extract_region_name_from_change_url(region_url)
+        resolved_region_name = self._sanitize_location(region_name)
         for link, city_hint in self._extract_city_links_with_hint(html, region_url):
             if link not in result:
                 result[link] = (self._sanitize_location(city_hint), resolved_region_name)
@@ -264,7 +261,7 @@ class MonetkaParser:
     def _collect_city_hints_for_region(self, region_url: str) -> dict[str, str]:
         city_contexts = self._collect_city_contexts_for_region(
             region_url,
-            region_name=self._extract_region_name_from_change_url(region_url),
+            region_name=None,
         )
         result: dict[str, str] = {}
         for city_url, (city_name, _region_name) in city_contexts.items():
@@ -400,8 +397,6 @@ class MonetkaParser:
                 continue
             seen.add(cleaned)
             region_name = self._sanitize_location(anchor.get_text(" ", strip=True))
-            if not region_name:
-                region_name = self._extract_region_name_from_change_url(cleaned)
             yield cleaned, region_name
 
     @staticmethod
@@ -512,9 +507,9 @@ class MonetkaParser:
         city_hint: str | None = None,
     ) -> tuple[str | None, str | None]:
         soup = BeautifulSoup(city_html, "lxml")
-        title_city, title_region = self._extract_city_region_from_title(soup)
-        city = self._sanitize_location(title_city)
-        region = self._sanitize_location(title_region)
+        del city_url
+        city = self._sanitize_location(city_hint)
+        region = None
 
         if not city:
             heading = soup.select_one("h1")
@@ -524,29 +519,10 @@ class MonetkaParser:
                 if heading_match:
                     city = self._sanitize_location(heading_match.group(1))
 
-        if not city and soup.title and soup.title.string:
-            raw_title = soup.title.string.strip()
-            legacy_match = re.search(
-                r"в\s+г\.\s*(.+?)\s*-\s*Торговая\s+сеть",
-                raw_title,
-                flags=re.IGNORECASE,
-            )
-            if legacy_match:
-                city = self._sanitize_location(legacy_match.group(1))
-
-        if not city and city_hint:
-            city = self._sanitize_location(city_hint)
-
         if not region:
             region_hint = soup.select_one("span.black.dashed")
             if region_hint:
                 region = self._sanitize_location(region_hint.get_text(" ", strip=True))
-
-        url_city, url_region = self._extract_city_region_from_url(city_url)
-        if not city:
-            city = self._sanitize_location(url_city)
-        if not region:
-            region = self._sanitize_location(url_region)
         return city, region
 
     def _parse_store_page(
@@ -592,11 +568,6 @@ class MonetkaParser:
             context_region=resolved_context_region,
             source_url=url,
         )
-        # Keep crawl hierarchy as source-of-truth; store page HTML is fallback/verification.
-        if resolved_context_city:
-            city = resolved_context_city
-        if resolved_context_region:
-            region = resolved_context_region
         city = self._sanitize_location(city)
         region = self._sanitize_location(region)
 
@@ -672,6 +643,26 @@ class MonetkaParser:
     def _is_request_failure(exc: Exception) -> bool:
         return isinstance(exc, RequestException) or MonetkaParser._get_http_status_code(exc) is not None
 
+    @staticmethod
+    def _is_expected_handled_404(*, scope: str, exc: Exception) -> bool:
+        return MonetkaParser._get_http_status_code(exc) == 404 and scope in {"city/pagination page"}
+
+    @staticmethod
+    def _resolve_request_issue_level(
+        *,
+        scope: str,
+        exc: Exception,
+        default_level: int,
+    ) -> int:
+        status_code = MonetkaParser._get_http_status_code(exc)
+        if MonetkaParser._is_expected_handled_404(scope=scope, exc=exc):
+            return logging.WARNING
+        if not MonetkaParser._is_request_failure(exc):
+            return logging.ERROR if default_level >= logging.WARNING else default_level
+        if status_code is None or status_code >= 500:
+            return logging.ERROR if default_level >= logging.WARNING else default_level
+        return default_level
+
     def _log_request_issue(
         self,
         *,
@@ -680,10 +671,11 @@ class MonetkaParser:
         exc: Exception,
         level: int = logging.WARNING,
     ) -> None:
+        resolved_level = self._resolve_request_issue_level(scope=scope, exc=exc, default_level=level)
         status_code = self._get_http_status_code(exc)
         if self._is_request_failure(exc):
             self.logger.log(
-                level,
+                resolved_level,
                 "Monetka: %s unavailable %s status_code=%s error=%s",
                 scope,
                 url,
@@ -691,7 +683,7 @@ class MonetkaParser:
                 exc,
             )
             return
-        self.logger.log(level, "Monetka: failed %s %s: %s", scope, url, exc)
+        self.logger.log(resolved_level, "Monetka: failed %s %s: %s", scope, url, exc)
 
     def _get_text_with_final_url(self, url: str) -> tuple[str, str]:
         if hasattr(self.client, "get_text_with_final_url"):
@@ -872,32 +864,17 @@ class MonetkaParser:
     ) -> tuple[str | None, str | None]:
         raw_text = text or soup.get_text("\n", strip=True)
         details_map = details or MonetkaParser._extract_details_from_dl(soup)
-        city: str | None = None
-        region: str | None = None
-
-        # 1) Visible page text.
-        visible_city, visible_region = MonetkaParser._extract_city_region_from_visible_text(
-            soup=soup,
-            text=raw_text,
-            details=details_map,
+        del url
+        city = MonetkaParser._sanitize_location(
+            details_map.get("city")
+            or MonetkaParser._extract_strict_label_value(raw_text, ("Город", "Населенный пункт"))
         )
-        visible_city = MonetkaParser._sanitize_location(visible_city)
-        visible_region = MonetkaParser._sanitize_location(visible_region)
-        if visible_city:
-            city = visible_city
-        if visible_region:
-            region = visible_region
+        region = MonetkaParser._sanitize_location(
+            details_map.get("region")
+            or MonetkaParser._extract_strict_label_value(raw_text, ("Регион", "Область", "Край", "Республика"))
+        )
 
-        # 2) Breadcrumbs.
-        breadcrumbs_city, breadcrumbs_region = MonetkaParser._extract_city_region_from_breadcrumbs(soup, url)
-        breadcrumbs_city = MonetkaParser._sanitize_location(breadcrumbs_city)
-        breadcrumbs_region = MonetkaParser._sanitize_location(breadcrumbs_region)
-        if not city and breadcrumbs_city:
-            city = breadcrumbs_city
-        if not region and breadcrumbs_region:
-            region = breadcrumbs_region
-
-        # 3) Structured HTML/script blocks.
+        # Structured HTML/script blocks can also carry explicit geography.
         structured_city, structured_region = MonetkaParser._extract_city_region_from_structured_blocks(soup)
         structured_city = MonetkaParser._sanitize_location(structured_city)
         structured_region = MonetkaParser._sanitize_location(structured_region)
@@ -905,15 +882,6 @@ class MonetkaParser:
             city = structured_city
         if not region and structured_region:
             region = structured_region
-
-        # 4) URL slug fallback.
-        url_city, url_region = MonetkaParser._extract_city_region_from_url(url)
-        url_city = MonetkaParser._sanitize_location(url_city)
-        url_region = MonetkaParser._sanitize_location(url_region)
-        if not city and url_city:
-            city = url_city
-        if not region and url_region:
-            region = url_region
 
         return MonetkaParser._sanitize_location(city), MonetkaParser._sanitize_location(region)
 
@@ -926,38 +894,42 @@ class MonetkaParser:
         context_region: str | None,
         source_url: str,
     ) -> tuple[str | None, str | None]:
-        """Reconcile store-page location with city-page context.
-
-        Monetka city pages may point to store URLs under '/shops_map/ekb/{id}' for many different cities.
-        In such cases URL and store-page title can be generic, while city page context is source-of-truth.
-        """
+        """Backfill geography from crawl context only when it is non-conflicting."""
         resolved_city = MonetkaParser._sanitize_location(city)
         resolved_region = MonetkaParser._sanitize_location(region)
         resolved_context_city = MonetkaParser._sanitize_location(context_city)
         resolved_context_region = MonetkaParser._sanitize_location(context_region)
 
-        if not resolved_context_city and not resolved_context_region:
+        del source_url
+
+        if (
+            resolved_city
+            and resolved_context_city
+            and not MonetkaParser._locations_match(resolved_city, resolved_context_city)
+        ):
             return resolved_city, resolved_region
 
-        url_city, _ = MonetkaParser._extract_city_region_from_url(source_url)
-        url_city_token = MonetkaParser._normalize_token(url_city) if url_city else ""
-        extracted_city_token = MonetkaParser._normalize_token(resolved_city) if resolved_city else ""
-        context_city_token = MonetkaParser._normalize_token(resolved_context_city) if resolved_context_city else ""
+        if (
+            resolved_region
+            and resolved_context_region
+            and not MonetkaParser._locations_match(resolved_region, resolved_context_region)
+        ):
+            if resolved_city:
+                return resolved_city, resolved_region
+            return None, resolved_region
 
-        should_use_context_city = False
-        if resolved_context_city:
-            if not resolved_city:
-                should_use_context_city = True
-            elif context_city_token and extracted_city_token and context_city_token != extracted_city_token:
-                should_use_context_city = True
-            elif context_city_token and url_city_token and context_city_token != url_city_token:
-                should_use_context_city = True
-
-        if should_use_context_city:
+        if not resolved_city and resolved_context_city:
             resolved_city = resolved_context_city
-            if resolved_context_region:
-                resolved_region = resolved_context_region
-        elif not resolved_region and resolved_context_region:
+
+        if (
+            not resolved_region
+            and resolved_context_region
+            and (
+                not resolved_city
+                or not resolved_context_city
+                or MonetkaParser._locations_match(resolved_city, resolved_context_city)
+            )
+        ):
             resolved_region = resolved_context_region
 
         return resolved_city, resolved_region
@@ -969,6 +941,7 @@ class MonetkaParser:
         text: str,
         details: dict[str, str],
     ) -> tuple[str | None, str | None]:
+        del soup
         city = details.get("city")
         region = details.get("region")
 
@@ -976,12 +949,6 @@ class MonetkaParser:
             city = MonetkaParser._extract_strict_label_value(text, ("Город", "Населенный пункт"))
         if not region:
             region = MonetkaParser._extract_strict_label_value(text, ("Регион", "Область", "Край", "Республика"))
-
-        title_city, title_region = MonetkaParser._extract_city_region_from_title(soup)
-        if not city and title_city:
-            city = title_city
-        if not region and title_region:
-            region = title_region
 
         return city, region
 
@@ -1156,6 +1123,12 @@ class MonetkaParser:
     @staticmethod
     def _normalize_token(value: str) -> str:
         return re.sub(r"[^a-zа-я0-9]+", "", value.lower())
+
+    @staticmethod
+    def _locations_match(left: str | None, right: str | None) -> bool:
+        if not left or not right:
+            return False
+        return MonetkaParser._normalize_token(left) == MonetkaParser._normalize_token(right)
 
     @staticmethod
     def _deduplicate_stores(stores: list[StoreRecord]) -> list[StoreRecord]:

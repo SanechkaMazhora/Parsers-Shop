@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_data_df(stores: list[StoreRecord]) -> pd.DataFrame:
-    rows = [store.to_dict() for store in stores]
+    rows = [{column: row.get(column) for column in DATA_COLUMNS} for row in build_snapshot_rows(stores)]
     data_df = pd.DataFrame(rows, columns=DATA_COLUMNS)
     if data_df.empty:
         return pd.DataFrame(columns=DATA_COLUMNS)
