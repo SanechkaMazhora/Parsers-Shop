@@ -50,6 +50,10 @@ def test_clean_city_strips_trailing_parenthesis_noise() -> None:
     assert address == "ул. Школьная, 1"
 
 
+def test_clean_city_keeps_explicit_locality_prefix_from_source_field() -> None:
+    assert MariaRaParser._clean_city("с. Первомайское,") == "с. Первомайское"
+
+
 def test_clean_city_and_address_extracts_city_from_address_when_city_missing() -> None:
     city, address = MariaRaParser._clean_city_and_address(None, "г. Новосибирск, ул. Советская, 10")
 
@@ -138,6 +142,21 @@ def test_normalize_store_extracts_region_and_city_from_address_prefix() -> None:
     assert record.address == "ул. Попова, 1"
 
 
+def test_normalize_store_keeps_explicit_locality_prefixed_city_from_source_field() -> None:
+    parser = MariaRaParser(client=None)
+
+    record = parser._normalize_store(
+        {
+            "city": "с. Первомайское,",
+            "address": "ул. Ленинская, 23",
+            "coords": [86.22733, 57.07005],
+        }
+    )
+
+    assert record.city == "с. Первомайское"
+    assert record.address == "ул. Ленинская, 23"
+
+
 def test_normalize_store_keeps_missing_optional_fields_as_none() -> None:
     parser = MariaRaParser(client=None)
 
@@ -215,3 +234,32 @@ def test_normalize_raw_js_item_with_partial_popup_keeps_missing_fields_as_none()
     assert record.phone is None
     assert record.store_format is None
     assert record.status is None
+
+
+def test_deduplicate_normalized_stores_collapses_duplicate_stable_key_and_tracks_conflict() -> None:
+    parser = MariaRaParser(client=None)
+    stores = [
+        parser._normalize_store(
+            {
+                "city": "г. Новосибирск",
+                "address": "ул.Плющихинская, 6",
+                "work_time": "8:00-22:00",
+                "coords": [83.00199, 55.01444],
+            }
+        ),
+        parser._normalize_store(
+            {
+                "city": "г. Новосибирск",
+                "address": "ул Плющихинская, д. 6",
+                "work_time": "9:00-22:00",
+                "coords": [83.00199, 55.01444],
+            }
+        ),
+    ]
+
+    deduped, duplicate_rows, conflicting_duplicates = parser._deduplicate_normalized_stores(stores)
+
+    assert len(deduped) == 1
+    assert duplicate_rows == 1
+    assert conflicting_duplicates == 1
+    assert deduped[0].city == "Новосибирск"

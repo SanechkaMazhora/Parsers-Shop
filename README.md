@@ -136,8 +136,10 @@ The first full run initializes the snapshot baseline and leaves `Изменен�
 - Missing or contradictory values are stored as `null`; the project prefers incomplete data over confidently false data.
 - Monetka can return expected `404` responses for some city, pagination, or detail pages. These are logged and handled; they do not automatically mean the whole run failed.
 - Monetka geography is confidence-based. Reliable signals can fill `city` and `region`, but weak hints such as detail titles, breadcrumbs-only hints, city-page paths, or technical URL segments like `shops_map/ekb/...` are not published as facts.
+- Monetka `phone` is stored only when the detail page exposes a store-specific contact. Generic site-wide footer phones are ignored to avoid false data.
 - If Monetka pages conflict and there is no reliable basis for a location field, `city` and/or `region` remain `null`.
 - Maria-Ra often does not provide a reliable `region`. The parser fills it only from explicit source fields or explicit address text; otherwise it remains `null`.
+- Maria-Ra can expose duplicate map entries for the same coordinates with conflicting text fields. The parser canonicalizes them by `stable_key` and logs the conflict instead of exporting duplicate identities.
 - Some sources may expose partial coordinates or partial metadata. The project keeps the available value and leaves the missing counterpart as `null`.
 
 ## Project Structure

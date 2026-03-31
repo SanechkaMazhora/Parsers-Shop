@@ -727,6 +727,44 @@ def test_parse_store_page_prefers_explicit_location_and_extracts_status_and_coor
     assert record.status == "Открыт"
 
 
+def test_parse_store_page_keeps_explicit_store_phone_only_from_store_details() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <body>
+        <dl>
+          <dt>Город</dt><dd>Асбест</dd>
+          <dt>Регион</dt><dd>Свердловская область</dd>
+          <dt>Телефон</dt><dd>8 800 555 35 35</dd>
+        </dl>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(html, "https://www.monetka.ru/shops_map/ekb/1")
+
+    assert record.phone == "8 800 555 35 35"
+
+
+def test_parse_store_page_does_not_take_global_site_footer_phone_as_store_phone() -> None:
+    parser = MonetkaParser(client=None)
+    html = """
+    <html>
+      <body>
+        <footer>
+          <a href="tel:88001008500"></a>
+          <a href="tel:+73432161970">тел: +7 (343) 216-19-70</a>
+          <a href="tel:+73432161972">факс: +7 (343) 216-19-72</a>
+        </footer>
+      </body>
+    </html>
+    """
+
+    record = parser._parse_store_page(html, "https://www.monetka.ru/shops_map/ekb/1")
+
+    assert record.phone is None
+
+
 def test_parse_store_page_ignores_detail_title_and_technical_url_slug_without_context() -> None:
     parser = MonetkaParser(client=None)
     html = """

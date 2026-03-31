@@ -553,7 +553,9 @@ class MonetkaParser:
             "store_format"
         )
         status = details.get("status") or self._extract_label_value(text, ("Статус",))
-        phone = details.get("phone") or self._extract_phone(text) or summary.get("phone")
+        # Ignore generic site-wide footer phones. Publish a phone only when it is
+        # attached to store-specific details that the page exposes explicitly.
+        phone = details.get("phone") or summary.get("phone")
         city, region = self._extract_city_region(soup, url, text=text, details=details)
         city = city or details.get("city") or self._extract_strict_label_value(text, ("Город", "Населенный пункт"))
         region = region or details.get("region") or self._extract_strict_label_value(
@@ -728,11 +730,6 @@ class MonetkaParser:
                 if value:
                     return value
         return None
-
-    @staticmethod
-    def _extract_phone(text: str) -> str | None:
-        match = re.search(r"(\+?\d[\d\-\s()]{7,}\d)", text)
-        return match.group(1).strip() if match else None
 
     @classmethod
     def _extract_store_summary_work_time(cls, anchor: Any, *, address: str | None) -> str | None:

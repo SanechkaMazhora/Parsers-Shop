@@ -62,6 +62,16 @@ class MariaRaParser:
                 stores.append(self._normalize_store(item))
             except Exception as exc:
                 self.logger.warning("Maria-Ra: failed parsing one store: %s", exc)
+        stores, duplicate_rows, conflicting_duplicates = self._deduplicate_normalized_stores(stores)
+        if duplicate_rows:
+            log_method = self.logger.warning if conflicting_duplicates else self.logger.info
+            log_method(
+                "Maria-Ra: deduplicated normalized stores %s -> %s (removed=%s conflicting=%s)",
+                len(stores) + duplicate_rows,
+                len(stores),
+                duplicate_rows,
+                conflicting_duplicates,
+            )
         self.logger.info("Maria-Ra: parsed %s stores", len(stores))
         return stores
 
@@ -686,6 +696,8 @@ class MariaRaParser:
         cleaned = re.sub(r"^(?:г\.?|город)\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.rstrip(")")
         cleaned = re.sub(r"\s*\)\s*$", "", cleaned).strip(" ,;")
+        if MariaRaParser._looks_like_locality_name(cleaned):
+            return cleaned or None
         if MariaRaParser._looks_like_address(cleaned):
             return None
         return cleaned or None
@@ -808,3 +820,50 @@ class MariaRaParser:
         if not value:
             return False
         return MariaRaParser._looks_like_address(value) and not bool(re.fullmatch(r"\d+[а-яa-z]?", value.strip(), flags=re.IGNORECASE))
+
+    @staticmethod
+    def _store_business_payload(store: StoreRecord) -> dict[str, Any]:
+        data = store.to_dict()
+        data.pop("collected_at", None)
+        return data
+
+    @classmethod
+    def _store_completeness_score(cls, store: StoreRecord) -> int:
+        return sum(
+            1
+            for value in cls._store_business_payload(store).values()
+            if value not in (None, "")
+        )
+
+    @classmethod
+    def _store_preference_key(cls, store: StoreRecord) -> tuple[int, int, tuple[str, ...]]:
+        data = cls._store_business_payload(store)
+        return (
+            cls._store_completeness_score(store),
+            len(str(data.get("address") or "")),
+            tuple(str(value or "") for value in data.values()),
+        )
+
+    @classmethod
+    def _deduplicate_normalized_stores(
+        cls,
+        stores: list[StoreRecord],
+    ) -> tuple[list[StoreRecord], int, int]:
+        deduped_by_key: dict[str, StoreRecord] = {}
+        conflicting_keys: set[str] = set()
+        for store in stores:
+            stable_key = store.stable_key()
+            existing = deduped_by_key.get(stable_key)
+            if existing is None:
+                deduped_by_key[stable_key] = store
+                continue
+            if cls._store_business_payload(existing) != cls._store_business_payload(store):
+                conflicting_keys.add(stable_key)
+            if cls._store_preference_key(store) >= cls._store_preference_key(existing):
+                deduped_by_key[stable_key] = store
+        deduped = sorted(
+            deduped_by_key.values(),
+            key=lambda store: tuple(str(value or "") for value in cls._store_business_payload(store).values()),
+        )
+        duplicate_rows = len(stores) - len(deduped)
+        return deduped, duplicate_rows, len(conflicting_keys)
