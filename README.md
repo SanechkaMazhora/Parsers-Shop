@@ -1,82 +1,33 @@
 # project_parser
 
-Live end-to-end parser suite for collecting store data from official retail sources, normalizing it into one schema, and producing an Excel report plus snapshot-based diff. The project is designed for local runs and scheduled jobs such as cron or Windows Task Scheduler.
+Парсерный pipeline для `Красное & Белое`, `Монетка` и `Мария-Ра`. Проект выполняет live-сбор, нормализует данные в единую схему, пишет `stores.xlsx`, сохраняет snapshot baseline и считает diff между полными прогонами.
 
-## What It Does
-
-- Runs all supported parsers in one command or a single parser by network name
-- Collects live data from official retail sources
-- Normalizes records into a single `StoreRecord` schema
-- Writes `stores.xlsx`, persists a JSON snapshot baseline, and computes diff between full runs
-- Returns scheduler-friendly exit codes so automation can distinguish successful and failed runs
-
-## Supported Networks
-
-- `kb` — Красное & Белое, REST API source
-- `monetka` — Монетка, HTML crawl with city and detail pages
-- `maria_ra` — Мария-Ра, JS payload extraction with Playwright fallback
-
-## Output Schema
-
-`network`, `region`, `city`, `address`, `work_time`, `latitude`, `longitude`, `phone`, `store_format`, `status`, `source_url`, `collected_at`
-
-The schema is stable, but individual fields are network-dependent and best-effort. If a value cannot be recovered reliably, the project stores `null` instead of inventing data.
-
-## Installation
-
-Recommended Python: `3.12.x`
+## Quick start
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pytest -q
+python main.py run
 ```
 
-Optional local config:
-
-```bash
-copy .env.example .env
-```
-
-Browser setup for Maria-Ra Playwright fallback:
+Для Playwright fallback у `Maria-Ra`:
 
 ```bash
 python -m playwright install chromium
 ```
 
-Notes:
+## CLI
 
-- `requirements.txt` is pinned to a tested dependency set for reproducible installs on a clean machine.
-- The browser install step is only required for the Maria-Ra Playwright fallback path. KB and Monetka do not need it.
-- On Linux / CI images that do not already have browser system packages, use `python -m playwright install --with-deps chromium`.
-
-Optional verification after setup:
-
-```bash
-python -m pytest -q
-```
-
-## Configuration
-
-Defaults can be provided via `.env`, and CLI flags override them.
-
-- `STORE_PARSER_OUTPUT` — Excel report path
-- `STORE_PARSER_SNAPSHOT` — snapshot JSON path; if omitted, it is derived from the Excel filename
-- `STORE_PARSER_LOG_FILE` — log file path
-- `STORE_PARSER_LOG_LEVEL` — log level
-- `STORE_PARSER_TIMEOUT` — HTTP timeout in seconds
-- `STORE_PARSER_RETRIES` — retry count for temporary HTTP failures
-
-## Run
-
-Full live run:
+Полный run:
 
 ```bash
 python main.py run
 ```
 
-Single network:
+Одна сеть:
 
 ```bash
 python main.py run --network kb
@@ -84,75 +35,73 @@ python main.py run --network monetka
 python main.py run --network maria_ra
 ```
 
-Custom artifact paths:
+Свои пути артефактов:
 
 ```bash
 python main.py run --output output/stores.xlsx --snapshot output/stores_snapshot.json
 ```
 
-`python main.py` without subcommand is also supported for backward compatibility and behaves like a full run.
-
-## Success Semantics
-
-A run is successful only if every selected parser completes without an unhandled parser-level exception.
-
-- `0` — all selected parsers completed; handled source issues may still appear as warnings
-- `1` — at least one selected parser failed at module level; partial export from successful parsers may still be written
-- `130` — the run was interrupted by the user
-
-Handled source problems inside a parser do not fail the whole run if `parse()` still returns a result. For example, an expected Monetka `404` or a partial record with missing fields can still be part of a successful run.
-
-For cron or Task Scheduler, treat any non-zero exit code as a failed job and inspect `logs/parser.log`. Exit code `1` means the produced Excel file, if present, is incomplete from an orchestration perspective.
-
-## Output Files
-
-Default artifacts:
+## Output
 
 - `output/stores.xlsx`
 - `output/stores_snapshot.json`
 - `logs/parser.log`
 
-`stores.xlsx` contains:
+`stores.xlsx` содержит листы:
 
-- `Актуальные данные` — current canonical dataset
-- `Изменения` — diff against the previous snapshot baseline
-- `Статистика` — counts by network
+- `Актуальные данные`
+- `Изменения`
+- `Статистика`
 
-## Snapshot And Diff
+Каноническая схема:
 
-Diff is computed against `stores_snapshot.json`, not against the previous Excel file.
+`network`, `region`, `city`, `address`, `work_time`, `latitude`, `longitude`, `phone`, `store_format`, `status`, `source_url`, `collected_at`
 
-- `added` — store exists in the new full snapshot and did not exist in the previous one
-- `removed` — store existed in the previous full snapshot and is missing in the new one
-- `changed` — store matched by `stable_key`, but tracked business fields changed
+## Exit codes
 
-Snapshot and Excel output are canonicalized by `stable_key` before saving. If multiple rows resolve to the same store identity, the most complete row wins and ties are broken deterministically.
+- `0` — все выбранные parser-модули завершились успешно
+- `1` — хотя бы один parser упал на уровне модуля; partial export может быть создан, но snapshot baseline не обновляется
+- `130` — run прерван пользователем
 
-The first full run initializes the snapshot baseline and leaves `Изменения` empty. Re-running on the same data with the same snapshot should produce no diff.
+Ожидаемые source-level проблемы внутри parser-а не делают весь run failed, если `parse()` вернул результат.
+Если parser падает на frontier/source-discovery этапе, run завершается с `exit code 1`, чтобы не фиксировать ложный baseline.
 
-## Data Quality And Source Limitations
+## Snapshot and diff
 
-- Some fields are best-effort and depend on what each source exposes.
-- Missing or contradictory values are stored as `null`; the project prefers incomplete data over confidently false data.
-- Monetka can return expected `404` responses for some city, pagination, or detail pages. These are logged and handled; they do not automatically mean the whole run failed.
-- Monetka geography is confidence-based. Reliable signals can fill `city` and `region`, but weak hints such as detail titles, breadcrumbs-only hints, city-page paths, or technical URL segments like `shops_map/ekb/...` are not published as facts.
-- Monetka `phone` is stored only when the detail page exposes a store-specific contact. Generic site-wide footer phones are ignored to avoid false data.
-- If Monetka pages conflict and there is no reliable basis for a location field, `city` and/or `region` remain `null`.
-- Maria-Ra often does not provide a reliable `region`. The parser fills it only from explicit source fields or explicit address text; otherwise it remains `null`.
-- Maria-Ra can expose duplicate map entries for the same coordinates with conflicting text fields. The parser canonicalizes them by `stable_key` and logs the conflict instead of exporting duplicate identities.
-- Some sources may expose partial coordinates or partial metadata. The project keeps the available value and leaves the missing counterpart as `null`.
+Diff считается по `stores_snapshot.json`.
 
-## Project Structure
+- `added` — новая точка появилась в новом полном snapshot
+- `removed` — точка исчезла из нового полного snapshot
+- `changed` — точка совпала по `stable_key`, но изменились отслеживаемые поля
 
-```text
-project_parser/
-  core/
-  parsers/
-  tests/
-  docs/
-  main.py
-  requirements.txt
-```
+Первый полный run только инициализирует baseline и оставляет лист `Изменения` пустым.
+При неуспешном parser-level run Excel все еще может быть создан для диагностики, но diff принудительно считается initial, а snapshot baseline сохраняется без изменений.
+
+## Configuration
+
+Настройки можно передавать через `.env` или переменные окружения:
+
+- `STORE_PARSER_OUTPUT`
+- `STORE_PARSER_SNAPSHOT`
+- `STORE_PARSER_LOG_FILE`
+- `STORE_PARSER_LOG_LEVEL`
+- `STORE_PARSER_TIMEOUT`
+- `STORE_PARSER_RETRIES`
+- `STORE_PARSER_KB_BASE_URL`
+- `STORE_PARSER_MONETKA_BASE_URL`
+- `STORE_PARSER_MARIA_RA_BASE_URL`
+- `STORE_PARSER_MARIA_RA_MAP_URL`
+
+По умолчанию используются официальные source URLs. Менять их стоит только осознанно.
+
+## Known limitations
+
+- `Monetka` может не отдавать координаты, `status` и `store_format` на detail pages; такие поля сохраняются как `null`.
+- `Monetka` может возвращать ожидаемые `404` для части city/pagination pages; это нормальное поведение источника и логируется как `WARNING`.
+- `Monetka` phone заполняется только если detail page явно содержит store-specific контакт. Глобальный phone сайта намеренно не публикуется.
+- `Maria-Ra` в live source не дает надежный `region`; поле намеренно остается `null`.
+- Часть полей во всех сетях best-effort. Если значение нельзя получить надежно, проект сохраняет `null`, а не выдумывает данные.
+- `KB` иногда отдает partial coordinates; проект сохраняет доступную координату и не достраивает вторую искусственно.
 
 ## Scheduling
 
@@ -168,8 +117,9 @@ cron / WSL:
 0 6 * * * cd /path/to/project_parser && .venv/bin/python main.py run >> cron.log 2>&1
 ```
 
-## Documentation
+## Docs
 
 - [Architecture](docs/architecture.md)
 - [Known Issues](docs/known_issues.md)
 - [Acceptance Criteria](docs/acceptance_criteria.md)
+- [Audit Report](docs/audit_report_20260331.md)

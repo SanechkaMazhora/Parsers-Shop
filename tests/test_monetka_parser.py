@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from requests import HTTPError, Response, Timeout
 from bs4 import BeautifulSoup
 
@@ -468,6 +469,50 @@ def test_parse_logs_expected_city_page_404_as_warning_not_error(caplog) -> None:
         record.levelno >= logging.ERROR and "city/pagination page unavailable" in record.message
         for record in caplog.records
     )
+
+
+def test_parse_raises_when_region_frontier_page_is_unavailable(caplog) -> None:
+    class FakeClient:
+        _pages = {
+            "https://www.monetka.ru/shops_map/": """
+                <a href="/region-a/change">Region A</a>
+            """,
+        }
+
+        def get_text(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+            if url in self._pages:
+                return self._pages[url]
+            if url == "https://www.monetka.ru/region-a/change":
+                raise Timeout("region request timed out")
+            raise RuntimeError(f"Unexpected URL: {url}")
+
+    parser = MonetkaParser(client=FakeClient())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="Monetka frontier unavailable"):
+            parser.parse()
+
+    assert any(
+        record.levelno == logging.ERROR and "region page unavailable" in record.message
+        for record in caplog.records
+    )
+
+
+def test_parse_raises_when_seed_page_has_no_region_links() -> None:
+    class FakeClient:
+        def get_text(self, url: str, **kwargs):  # type: ignore[no-untyped-def]
+            if url == "https://www.monetka.ru/shops_map/":
+                return """
+                <ul class="shop_city_list_ul">
+                  <li><a href="/region-a/shops_map/city-one">City One</a></li>
+                </ul>
+                """
+            raise RuntimeError(f"Unexpected URL: {url}")
+
+    parser = MonetkaParser(client=FakeClient())
+
+    with pytest.raises(RuntimeError, match="no region links"):
+        parser.parse()
 
 
 def test_parse_logs_unexpected_city_page_failure_as_error(caplog) -> None:

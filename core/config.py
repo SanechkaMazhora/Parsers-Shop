@@ -11,6 +11,10 @@ DEFAULT_LOG_FILE = "logs/parser.log"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_HTTP_TIMEOUT = 20
 DEFAULT_HTTP_RETRIES = 3
+DEFAULT_KB_BASE_URL = "https://krasnoeibeloe.ru"
+DEFAULT_MONETKA_BASE_URL = "https://www.monetka.ru"
+DEFAULT_MARIA_RA_BASE_URL = "https://www.maria-ra.ru"
+DEFAULT_MARIA_RA_MAP_URL = "https://www.maria-ra.ru/o-kompanii/karta-seti/"
 
 
 def _get_int_env(name: str, default: int, *, min_value: int) -> int:
@@ -24,6 +28,14 @@ def _get_int_env(name: str, default: int, *, min_value: int) -> int:
     if parsed < min_value:
         return default
     return parsed
+
+
+def _get_str_env(name: str, default: str) -> str:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    cleaned = raw_value.strip()
+    return cleaned or default
 
 
 def get_default_output_path() -> str:
@@ -55,3 +67,23 @@ def get_default_http_timeout() -> int:
 def get_default_http_retries() -> int:
     """Resolve HTTP retry count from environment."""
     return _get_int_env("STORE_PARSER_RETRIES", DEFAULT_HTTP_RETRIES, min_value=0)
+
+
+def get_kb_base_url() -> str:
+    """Resolve KB base URL from environment or fallback default."""
+    return _get_str_env("STORE_PARSER_KB_BASE_URL", DEFAULT_KB_BASE_URL).rstrip("/")
+
+
+def get_monetka_base_url() -> str:
+    """Resolve Monetka base URL from environment or fallback default."""
+    return _get_str_env("STORE_PARSER_MONETKA_BASE_URL", DEFAULT_MONETKA_BASE_URL).rstrip("/")
+
+
+def get_maria_ra_base_url() -> str:
+    """Resolve Maria-Ra base URL from environment or fallback default."""
+    return _get_str_env("STORE_PARSER_MARIA_RA_BASE_URL", DEFAULT_MARIA_RA_BASE_URL).rstrip("/")
+
+
+def get_maria_ra_map_url() -> str:
+    """Resolve Maria-Ra map URL from environment or fallback default."""
+    return _get_str_env("STORE_PARSER_MARIA_RA_MAP_URL", DEFAULT_MARIA_RA_MAP_URL).rstrip("/") + "/"

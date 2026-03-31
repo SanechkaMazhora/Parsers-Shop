@@ -86,6 +86,9 @@ def export_stores_to_excel(
     stores: list[StoreRecord],
     output_path: str = "output/stores.xlsx",
     snapshot_path: str | None = None,
+    *,
+    write_snapshot: bool = True,
+    treat_diff_as_initial: bool = False,
 ) -> DiffResult:
     """Export stores, changes and statistics into an Excel workbook."""
     output_file = Path(output_path)
@@ -103,7 +106,7 @@ def export_stores_to_excel(
     diff_result = compute_diff(
         previous_snapshot=snapshot_load_result.rows,
         current_snapshot=current_snapshot,
-        treat_as_initial=snapshot_load_result.status != "loaded",
+        treat_as_initial=treat_diff_as_initial or snapshot_load_result.status != "loaded",
         snapshot_status=snapshot_load_result.status,
     )
 
@@ -118,5 +121,8 @@ def export_stores_to_excel(
         for sheet_name in (DATA_SHEET_NAME, CHANGES_SHEET_NAME, STATS_SHEET_NAME):
             _apply_worksheet_formatting(writer.book[sheet_name])
 
-    save_snapshot(stores, snapshot_file)
+    if write_snapshot:
+        save_snapshot(stores, snapshot_file)
+    else:
+        logger.warning("Snapshot update skipped, baseline preserved: %s", snapshot_file)
     return diff_result

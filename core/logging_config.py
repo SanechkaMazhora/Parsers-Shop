@@ -23,3 +23,6 @@ def setup_logging() -> None:
             logging.StreamHandler(),
         ],
     )
+    # Retry internals are too noisy for operational logs; parsers emit final handled failures themselves.
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+    logging.getLogger("urllib3.util.retry").setLevel(logging.ERROR)

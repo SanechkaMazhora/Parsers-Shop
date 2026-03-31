@@ -105,10 +105,18 @@ def run(
         logger.warning("Interrupted by user")
         return EXIT_INTERRUPTED
 
+    if failed_parsers:
+        logger.warning(
+            "Snapshot update disabled because parser failures occurred: failed=%s",
+            ",".join(failed_parsers),
+        )
+
     diff_result = export_stores_to_excel(
         all_stores,
         output_path=resolved_output_path,
         snapshot_path=resolved_snapshot_path,
+        write_snapshot=not failed_parsers,
+        treat_diff_as_initial=bool(failed_parsers),
     )
     duration_seconds = perf_counter() - started_at
     logger.info(

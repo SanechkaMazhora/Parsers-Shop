@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from core.config import get_kb_base_url
 from core.http_client import HttpClient
 from core.models import StoreRecord
 
@@ -18,7 +19,7 @@ class KBParser:
     def __init__(self, client: HttpClient | None = None) -> None:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.base_url = "https://krasnoeibeloe.ru"
+        self.base_url = get_kb_base_url()
         self._city_endpoint_candidates = (
             f"{self.base_url}/api/cities/list/",
             f"{self.base_url}/api/cities/list",

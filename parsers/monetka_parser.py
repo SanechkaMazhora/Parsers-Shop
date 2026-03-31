@@ -11,6 +11,7 @@ from urllib.parse import unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 from requests import RequestException
 
+from core.config import get_monetka_base_url
 from core.http_client import HttpClient
 from core.models import StoreRecord
 
@@ -23,7 +24,7 @@ class MonetkaParser:
     def __init__(self, client: HttpClient | None = None) -> None:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.base_url = "https://www.monetka.ru"
+        self.base_url = get_monetka_base_url()
         self._debug_location_logs_left = 5
         self._city_links_filtered_count = 0
         self._accepted_city_href_samples: list[str] = []
@@ -221,15 +222,16 @@ class MonetkaParser:
             try:
                 html = self.client.get_text(url)
             except Exception as exc:
-                self._log_request_issue(scope="seed page", url=url, exc=exc, level=logging.INFO)
-                continue
+                self._raise_frontier_failure(scope="seed page", url=url, exc=exc)
 
             for region_link, region_name in self._extract_region_links_with_name(html, url):
                 if region_link not in regions:
                     regions[region_link] = region_name
 
         if not regions:
-            self.logger.warning("Monetka: no region links ending with '/change' found on seed pages")
+            message = "Monetka: no region links ending with '/change' found on seed pages"
+            self.logger.error(message)
+            raise RuntimeError(message)
         return sorted(regions.items())
 
     def _collect_region_pages(self) -> list[str]:
@@ -249,8 +251,7 @@ class MonetkaParser:
         try:
             html = self.client.get_text(region_url, headers=request_headers)
         except Exception as exc:
-            self._log_request_issue(scope="region page", url=region_url, exc=exc, level=logging.INFO)
-            return result
+            self._raise_frontier_failure(scope="region page", url=region_url, exc=exc)
 
         resolved_region_name = self._sanitize_location(region_name)
         for link, city_hint in self._extract_city_links_with_hint(html, region_url):
@@ -686,6 +687,10 @@ class MonetkaParser:
             )
             return
         self.logger.log(resolved_level, "Monetka: failed %s %s: %s", scope, url, exc)
+
+    def _raise_frontier_failure(self, *, scope: str, url: str, exc: Exception) -> None:
+        self._log_request_issue(scope=scope, url=url, exc=exc, level=logging.ERROR)
+        raise RuntimeError(f"Monetka frontier unavailable for {scope}: {url}") from exc
 
     def _get_text_with_final_url(self, url: str) -> tuple[str, str]:
         if hasattr(self.client, "get_text_with_final_url"):

@@ -37,10 +37,19 @@ def test_run_returns_non_zero_when_any_parser_fails_but_exports_partial_results(
         def parse(self) -> list[StoreRecord]:
             raise RuntimeError("fatal parser error")
 
-    def fake_export(stores, output_path, snapshot_path):  # type: ignore[no-untyped-def]
+    def fake_export(  # type: ignore[no-untyped-def]
+        stores,
+        output_path,
+        snapshot_path,
+        *,
+        write_snapshot=True,
+        treat_diff_as_initial=False,
+    ):
         exported["stores"] = list(stores)
         exported["output_path"] = output_path
         exported["snapshot_path"] = snapshot_path
+        exported["write_snapshot"] = write_snapshot
+        exported["treat_diff_as_initial"] = treat_diff_as_initial
         return SimpleNamespace(added=[], removed=[], changed=[])
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: None)
@@ -56,6 +65,8 @@ def test_run_returns_non_zero_when_any_parser_fails_but_exports_partial_results(
     assert exit_code == main_module.EXIT_RUNTIME_FAILURE
     assert exported["output_path"] == "output/test.xlsx"
     assert exported["snapshot_path"] == "output/test.json"
+    assert exported["write_snapshot"] is False
+    assert exported["treat_diff_as_initial"] is True
     stores = exported["stores"]
     assert isinstance(stores, list)
     assert len(stores) == 1
@@ -95,8 +106,17 @@ def test_run_stays_successful_when_monetka_handles_expected_404(monkeypatch) -> 
 
     monetka = MonetkaParser(client=FakeClient())
 
-    def fake_export(stores, output_path, snapshot_path):  # type: ignore[no-untyped-def]
+    def fake_export(  # type: ignore[no-untyped-def]
+        stores,
+        output_path,
+        snapshot_path,
+        *,
+        write_snapshot=True,
+        treat_diff_as_initial=False,
+    ):
         exported["stores"] = list(stores)
+        exported["write_snapshot"] = write_snapshot
+        exported["treat_diff_as_initial"] = treat_diff_as_initial
         return SimpleNamespace(added=[], removed=[], changed=[])
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: None)
@@ -111,6 +131,8 @@ def test_run_stays_successful_when_monetka_handles_expected_404(monkeypatch) -> 
     assert len(stores) == 1
     assert stores[0].city == "City One"
     assert stores[0].region == "Region A"
+    assert exported["write_snapshot"] is True
+    assert exported["treat_diff_as_initial"] is False
 
 
 def test_main_returns_run_exit_code_for_run_command(monkeypatch) -> None:

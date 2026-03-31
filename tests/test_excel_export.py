@@ -133,6 +133,41 @@ def test_excel_export_second_identical_run_has_empty_changes_sheet() -> None:
             snapshot_path.unlink()
 
 
+def test_excel_export_preserves_existing_snapshot_when_snapshot_write_is_disabled() -> None:
+    output_path = _unique_output_path()
+    snapshot_path = _snapshot_path_for(output_path)
+    try:
+        baseline_stores = [
+            _make_store("n1", "c1", "a1", work_time="09:00-18:00"),
+            _make_store("n1", "c1", "a2"),
+        ]
+        export_stores_to_excel(baseline_stores, output_path=str(output_path))
+        baseline_snapshot_text = snapshot_path.read_text(encoding="utf-8")
+
+        partial_stores = [_make_store("n1", "c1", "a1", work_time="10:00-20:00")]
+        diff_result = export_stores_to_excel(
+            partial_stores,
+            output_path=str(output_path),
+            write_snapshot=False,
+            treat_diff_as_initial=True,
+        )
+
+        assert diff_result.is_initial_snapshot is True
+        assert snapshot_path.read_text(encoding="utf-8") == baseline_snapshot_text
+
+        changes_df = pd.read_excel(output_path, sheet_name=CHANGES_SHEET_NAME)
+        data_df = pd.read_excel(output_path, sheet_name=DATA_SHEET_NAME)
+
+        assert changes_df.empty
+        assert len(data_df) == 1
+        assert data_df.iloc[0]["work_time"] == "10:00-20:00"
+    finally:
+        if output_path.exists():
+            output_path.unlink()
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+
+
 def test_excel_export_snapshot_and_data_sheet_share_canonical_schema() -> None:
     output_path = _unique_output_path()
     snapshot_path = _snapshot_path_for(output_path)

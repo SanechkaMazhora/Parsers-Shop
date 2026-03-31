@@ -9,10 +9,11 @@ import ast
 import warnings
 from html import unescape
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from core.config import get_maria_ra_base_url, get_maria_ra_map_url
 from core.http_client import HttpClient
 from core.models import StoreRecord
 
@@ -25,8 +26,8 @@ class MariaRaParser:
     def __init__(self, client: HttpClient | None = None) -> None:
         self.client = client or HttpClient()
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.map_url = "https://www.maria-ra.ru/o-kompanii/karta-seti/"
-        self.base_url = "https://www.maria-ra.ru"
+        self.base_url = get_maria_ra_base_url()
+        self.map_url = get_maria_ra_map_url()
 
     def parse(self) -> list[StoreRecord]:
         """Collect stores from map page scripts or fallback DOM extraction."""
@@ -534,9 +535,9 @@ class MariaRaParser:
             ("confirm18", "1"),
             ("age", "18"),
         )
-        for name, value in cookie_variants:
-            self.client.session.cookies.set(name, value, domain=".maria-ra.ru", path="/")
-            self.client.session.cookies.set(name, value, domain="www.maria-ra.ru", path="/")
+        for domain in self._age_gate_cookie_domains():
+            for name, value in cookie_variants:
+                self.client.session.cookies.set(name, value, domain=domain, path="/")
 
     @staticmethod
     def _is_age_gate_page(html: str) -> bool:
@@ -556,11 +557,15 @@ class MariaRaParser:
     def _prepare_age_bypass_playwright(self, context: Any) -> None:
         """Preseed common age-confirmation cookies before opening pages."""
         cookies = [
-            {"name": "is_adult", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
-            {"name": "adult", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
-            {"name": "age_verified", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
-            {"name": "confirm18", "value": "1", "domain": ".maria-ra.ru", "path": "/"},
-            {"name": "age", "value": "18", "domain": ".maria-ra.ru", "path": "/"},
+            {"name": name, "value": value, "domain": domain, "path": "/"}
+            for domain in self._age_gate_cookie_domains()
+            for name, value in (
+                ("is_adult", "1"),
+                ("adult", "1"),
+                ("age_verified", "1"),
+                ("confirm18", "1"),
+                ("age", "18"),
+            )
         ]
         try:
             context.add_cookies(cookies)
@@ -820,6 +825,21 @@ class MariaRaParser:
         if not value:
             return False
         return MariaRaParser._looks_like_address(value) and not bool(re.fullmatch(r"\d+[а-яa-z]?", value.strip(), flags=re.IGNORECASE))
+
+    def _age_gate_cookie_domains(self) -> tuple[str, ...]:
+        hostname = (urlparse(self.base_url).hostname or "").strip().strip(".")
+        if not hostname:
+            return ()
+        domains = {hostname}
+        if hostname.startswith("www."):
+            bare_hostname = hostname.removeprefix("www.")
+            if bare_hostname:
+                domains.add(bare_hostname)
+                domains.add(f".{bare_hostname}")
+        else:
+            domains.add(f".{hostname}")
+            domains.add(f"www.{hostname}")
+        return tuple(sorted(domain for domain in domains if domain))
 
     @staticmethod
     def _store_business_payload(store: StoreRecord) -> dict[str, Any]:
