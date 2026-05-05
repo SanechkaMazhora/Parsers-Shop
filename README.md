@@ -1,33 +1,89 @@
-# project_parser
+# Parsers-Shop
 
-Парсерный pipeline для `Красное & Белое`, `Монетка` и `Мария-Ра`. Проект выполняет live-сбор, нормализует данные в единую схему, пишет `stores.xlsx`, сохраняет snapshot baseline и считает diff между полными прогонами.
+## Описание проекта
 
-## Quick start
+`Parsers-Shop` — это Python-пайплайн для сбора, нормализации и сравнения данных о магазинах из нескольких торговых сетей. Проект получает данные из официальных публичных источников, приводит их к единой модели `StoreRecord`, сохраняет результаты в Excel и поддерживает snapshot в JSON для сравнения изменений между запусками.
+
+## Поддерживаемые сети
+
+- Красное & Белое
+- Монетка
+- Мария-Ра
+
+## Возможности
+
+- единая модель данных `StoreRecord`
+- парсинг магазинов из разных источников
+- сохранение snapshot в JSON
+- сравнение изменений между запусками
+- экспорт результатов в Excel
+- запуск из командной строки
+- тесты
+
+## Установка
+
+Создание виртуального окружения:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pytest -q
-python main.py run
 ```
 
-Для Playwright fallback у `Maria-Ra`:
+Установка зависимостей в PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Установка зависимостей в Bash:
+
+```bash
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Для резервного сценария `Мария-Ра` при использовании Playwright может понадобиться дополнительная установка браузера:
 
 ```bash
 python -m playwright install chromium
 ```
 
-## CLI
+## Настройка
 
-Полный run:
+Проект читает переменные окружения напрямую и автоматически подгружает локальный файл `.env` через `python-dotenv`.
+
+В репозитории есть шаблон настроек `.env.example`. Обычно достаточно создать на его основе свой локальный `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Основные параметры:
+
+- `STORE_PARSER_OUTPUT` — путь до Excel-отчета
+- `STORE_PARSER_SNAPSHOT` — путь до snapshot JSON; если не задан, путь вычисляется автоматически на основе имени Excel-файла
+- `STORE_PARSER_LOG_FILE` — путь до лог-файла
+- `STORE_PARSER_LOG_LEVEL` — уровень логирования
+- `STORE_PARSER_TIMEOUT` — таймаут HTTP-запроса в секундах
+- `STORE_PARSER_RETRIES` — количество повторных HTTP-попыток
+- `STORE_PARSER_KB_BASE_URL` — переопределение базового URL для Красное & Белое
+- `STORE_PARSER_MONETKA_BASE_URL` — переопределение базового URL для Монетка
+- `STORE_PARSER_MARIA_RA_BASE_URL` — переопределение базового URL для Мария-Ра
+- `STORE_PARSER_MARIA_RA_MAP_URL` — переопределение URL карты магазинов Мария-Ра
+
+Менять URL-адреса источников стоит только осознанно, например для контролируемого тестирования или работы с официальным зеркалом.
+
+## Запуск
+
+Полный запуск:
 
 ```bash
 python main.py run
 ```
 
-Одна сеть:
+Запуск отдельной сети:
 
 ```bash
 python main.py run --network kb
@@ -35,91 +91,49 @@ python main.py run --network monetka
 python main.py run --network maria_ra
 ```
 
-Свои пути артефактов:
+Важно: в текущей реализации для выбора сети используется флаг `--network`, а не `--parser`.
+
+## Тесты
+
+Запуск тестов:
 
 ```bash
-python main.py run --output output/stores.xlsx --snapshot output/stores_snapshot.json
+pytest
 ```
 
-## Output
+Также можно использовать:
+
+```bash
+python -m pytest -q
+```
+
+## Результаты работы
+
+По умолчанию проект создает следующие артефакты:
 
 - `output/stores.xlsx`
 - `output/stores_snapshot.json`
 - `logs/parser.log`
 
-`stores.xlsx` содержит листы:
+Excel-файл содержит листы с актуальными данными, изменениями и сводной статистикой.
 
-- `Актуальные данные`
-- `Изменения`
-- `Статистика`
+## Ограничения
 
-Каноническая схема:
+- часть полей зависит от доступности данных на стороне сайта или API
+- координаты, регион, формат магазина и статус могут быть доступны не для всех сетей
+- внешние API и HTML-источники могут быть нестабильны и меняться без предупреждения
+- при VPN, сетевых ограничениях или нестабильном соединении некоторые источники могут возвращать `0` магазинов или `timeout`
+- проект старается обрабатывать такие ошибки без аварийного завершения, если это возможно в рамках текущего источника
+- первый полный запуск только создает базовый snapshot; осмысленное сравнение изменений появляется начиная со второго сопоставимого запуска
 
-`network`, `region`, `city`, `address`, `work_time`, `latitude`, `longitude`, `phone`, `store_format`, `status`, `source_url`, `collected_at`
+## Статус проекта
 
-## Exit codes
+Готов к демонстрации. Частично соответствует строгим требованиям из-за ограничений внешних источников данных.
 
-- `0` — все выбранные parser-модули завершились успешно
-- `1` — хотя бы один parser упал на уровне модуля; partial export может быть создан, но snapshot baseline не обновляется
-- `130` — run прерван пользователем
+## Дополнительные материалы
 
-Ожидаемые source-level проблемы внутри parser-а не делают весь run failed, если `parse()` вернул результат.
-Если parser падает на frontier/source-discovery этапе, run завершается с `exit code 1`, чтобы не фиксировать ложный baseline.
-
-## Snapshot and diff
-
-Diff считается по `stores_snapshot.json`.
-
-- `added` — новая точка появилась в новом полном snapshot
-- `removed` — точка исчезла из нового полного snapshot
-- `changed` — точка совпала по `stable_key`, но изменились отслеживаемые поля
-
-Первый полный run только инициализирует baseline и оставляет лист `Изменения` пустым.
-При неуспешном parser-level run Excel все еще может быть создан для диагностики, но diff принудительно считается initial, а snapshot baseline сохраняется без изменений.
-
-## Configuration
-
-Настройки можно передавать через `.env` или переменные окружения:
-
-- `STORE_PARSER_OUTPUT`
-- `STORE_PARSER_SNAPSHOT`
-- `STORE_PARSER_LOG_FILE`
-- `STORE_PARSER_LOG_LEVEL`
-- `STORE_PARSER_TIMEOUT`
-- `STORE_PARSER_RETRIES`
-- `STORE_PARSER_KB_BASE_URL`
-- `STORE_PARSER_MONETKA_BASE_URL`
-- `STORE_PARSER_MARIA_RA_BASE_URL`
-- `STORE_PARSER_MARIA_RA_MAP_URL`
-
-По умолчанию используются официальные source URLs. Менять их стоит только осознанно.
-
-## Known limitations
-
-- `Monetka` может не отдавать координаты, `status` и `store_format` на detail pages; такие поля сохраняются как `null`.
-- `Monetka` может возвращать ожидаемые `404` для части city/pagination pages; это нормальное поведение источника и логируется как `WARNING`.
-- `Monetka` phone заполняется только если detail page явно содержит store-specific контакт. Глобальный phone сайта намеренно не публикуется.
-- `Maria-Ra` в live source не дает надежный `region`; поле намеренно остается `null`.
-- Часть полей во всех сетях best-effort. Если значение нельзя получить надежно, проект сохраняет `null`, а не выдумывает данные.
-- `KB` иногда отдает partial coordinates; проект сохраняет доступную координату и не достраивает вторую искусственно.
-
-## Scheduling
-
-Windows Task Scheduler:
-
-```bash
-cmd /c "cd /d C:\path\to\project_parser && .venv\Scripts\python.exe main.py run"
-```
-
-cron / WSL:
-
-```bash
-0 6 * * * cd /path/to/project_parser && .venv/bin/python main.py run >> cron.log 2>&1
-```
-
-## Docs
-
-- [Architecture](docs/architecture.md)
-- [Known Issues](docs/known_issues.md)
-- [Acceptance Criteria](docs/acceptance_criteria.md)
-- [Audit Report](docs/audit_report_20260331.md)
+- [Архитектура](docs/architecture.md)
+- [Известные ограничения](docs/known_issues.md)
+- [Анализ источника: Красное & Белое](docs/analys_KB.txt)
+- [Анализ источника: Монетка](docs/analys_monetka.txt)
+- [Анализ источника: Мария-Ра](docs/analys_maria_ra.txt)
